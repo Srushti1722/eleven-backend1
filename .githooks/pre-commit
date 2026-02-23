@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+patterns='(sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[A-Za-z0-9-]+|OPENAI_API_KEY\s*=\s*.+|GEMINI_API_KEY\s*=\s*.+|ANTHROPIC_API_KEY\s*=\s*.+|GROQ_API_KEY\s*=\s*.+)'
+found=0
+
+for file in $staged_files; do
+  if [ -f "$file" ] && grep -IEn "$patterns" "$file" >/dev/null 2>&1; then
+    echo "Potential secret detected in staged file: $file"
+    grep -IEn "$patterns" "$file" | sed 's/^/  /'
+    found=1
+  fi
+done
+
+if [ "$found" -ne 0 ]; then
+  echo "Commit blocked. Move secrets to .env.local (already gitignored), then recommit."
+  exit 1
+fi
+
+exit 0
