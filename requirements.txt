@@ -1,12 +1,11 @@
-git-filter-repo==2.47.0
 livekit-agents
 livekit-plugins-silero
 livekit-plugins-noise-cancellation
 livekit-plugins-turn-detector
 mem0ai
 chromadb==0.5.23
+tokenizers==0.19.1
 sentence-transformers
 python-dotenv
 google-generativeai
 litellm
-python-dotenv
