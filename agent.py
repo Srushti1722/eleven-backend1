@@ -24,7 +24,7 @@ import sys
 import sympy
 
 logger = logging.getLogger("agent-Casey-10be")
-
+logging.basicConfig(level=logging.INFO)
 load_dotenv(".env.local")
 
 
@@ -226,12 +226,12 @@ def _start_health_server() -> None:
         def log_message(self, fmt: str, *args: object) -> None:  # suppress logs
             pass
 
-    srv = HTTPServer(("0.0.0.0", port), _Handler)
+    srv = HTTPServer(("", port), _Handler)
     logger.info("Health-check server listening on port %d", port)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
 if __name__ == "__main__":
-    validate_livekit_env()
-    _start_health_server()
-    cli.run_app(server)
+    _start_health_server()          # 🔥 bind PORT immediately
+    validate_livekit_env()          # env checks
+    cli.run_app(server)             # LiveKit agent (blocking)
