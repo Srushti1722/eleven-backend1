@@ -18,11 +18,33 @@ from livekit.plugins import (
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from mem0 import Memory
 import os
+import sys
 import sympy
 
 logger = logging.getLogger("agent-Casey-10be")
 
 load_dotenv(".env.local")
+
+
+def _has_cli_ws_url() -> bool:
+    return any(
+        arg.startswith("--ws-url") or arg.startswith("--url")
+        for arg in sys.argv[1:]
+    )
+
+
+def validate_livekit_env() -> None:
+    if _has_cli_ws_url():
+        return
+
+    required_vars = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
+    missing_vars = [name for name in required_vars if not os.getenv(name)]
+    if missing_vars:
+        missing = ", ".join(missing_vars)
+        raise SystemExit(
+            "Missing required LiveKit configuration: "
+            f"{missing}. Set these in .env.local or pass --ws-url when running dev."
+        )
 
 # ─── mem0 setup (no mem0 API key, runs locally) ───────────────────────────────
 mem0_config = {
@@ -40,12 +62,12 @@ mem0_config = {
         }
     },
     "vector_store": {
-        "provider": "chroma",
-        "config": {
-            "collection_name": "interview_memories",
-            "path": "./chroma_db",
-        }
-    },
+    "provider": "chroma",
+    "config": {
+        "collection_name": "interview_memories",
+        "path": "./chroma_db",
+    }
+},
     "version": "v1.1"
 }
 
@@ -184,4 +206,5 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
+    validate_livekit_env()
     cli.run_app(server)

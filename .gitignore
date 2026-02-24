@@ -14,8 +14,9 @@ env/
 
 # Local databases and logs
 chroma_db/
-KMS/logs/
+*.sqlite
 *.sqlite3
+KMS/logs/
 
 # OS/editor files
 .DS_Store
