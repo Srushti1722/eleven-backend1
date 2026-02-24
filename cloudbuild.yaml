@@ -1,36 +1,40 @@
 steps:
-  # Pull the previously cached image (fails silently on first build)
+  # ── Stage 1: Base image (heavy deps — pip install) ────────────────────────
+  # Pull the cached base image so Docker can reuse its layers
   - name: 'gcr.io/cloud-builders/docker'
     entrypoint: 'bash'
-    args:
-      - '-c'
-      - 'docker pull $_CACHE_IMAGE_URI || true'
+    args: ['-c', 'docker pull $_BASE_IMAGE_URI || true']
 
-  # Build using the cached layer as a starting point
-  # Docker reuses any layer whose inputs haven't changed (e.g. requirements.txt)
+  # Build the base image — cache hit after the first time, takes ~30 sec
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
-      - '--cache-from=$_CACHE_IMAGE_URI'
+      - '--cache-from=$_BASE_IMAGE_URI'
+      - '-t'
+      - '$_BASE_IMAGE_URI'
+      - '-f'
+      - 'Dockerfile.base'
+      - '.'
+
+  # Push base image so the next build can pull it as cache
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '$_BASE_IMAGE_URI']
+
+  # ── Stage 2: App image (just COPY . . — always fast) ─────────────────────
+  # Build the final image on top of the pre-built base
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg=BASE_IMAGE=$_BASE_IMAGE_URI'
       - '-t'
       - '$_IMAGE_URI'
-      - '-t'
-      - '$_CACHE_IMAGE_URI'
       - '.'
 
   # Push the commit-tagged image used by Cloud Run
   - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - '$_IMAGE_URI'
+    args: ['push', '$_IMAGE_URI']
 
-  # Push the `latest` tag so the next build can reuse it as cache
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - '$_CACHE_IMAGE_URI'
-
-  # Deploy to Cloud Run
+  # ── Stage 3: Deploy ───────────────────────────────────────────────────────
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -49,11 +53,11 @@ substitutions:
   _SERVICE_NAME: agent-backend
   _REGION: us-central1
   _IMAGE_URI: gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA
-  # `latest` is used as the layer cache source for every build
-  _CACHE_IMAGE_URI: gcr.io/$PROJECT_ID/agent-backend:latest
+  # Base image stores all pip-installed deps — rebuilt only when requirements.txt changes
+  _BASE_IMAGE_URI: gcr.io/$PROJECT_ID/agent-base:latest
 
-# 30-minute timeout for the first (cold) build; subsequent builds will be ~5 min
-timeout: '1800s'
+# 60 min for the one-time base build; every build after that is ~3-5 min
+timeout: '3600s'
 
 options:
   machineType: 'E2_HIGHCPU_8'

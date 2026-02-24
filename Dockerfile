@@ -1,19 +1,11 @@
-FROM python:3.11-slim
+# Cloud Build passes the pre-built base image via --build-arg.
+# Falls back to python:3.11-slim for local `docker build` without the arg.
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-# System deps required by chromadb, sentence-transformers, and tokenizers
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-
-# --no-cache-dir keeps the image smaller and avoids disk-pressure during build
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
+# Copy only the application code — all deps are already in the base image
 COPY . .
 
 # Cloud Run injects $PORT; fall back to 8080 for local runs

@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps required by chromadb, sentence-transformers, and tokenizers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+# Install all heavy dependencies — this layer is cached after the first build
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
