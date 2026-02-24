@@ -1,4 +1,6 @@
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import (
@@ -205,6 +207,31 @@ async def entrypoint(ctx: JobContext):
     )
 
 
+def _start_health_server() -> None:
+    """Minimal HTTP server so Cloud Run considers the container healthy.
+
+    Cloud Run kills containers that do not bind to $PORT within the startup
+    timeout.  The LiveKit agent only makes *outbound* connections, so we
+    spin up a tiny health-check server on a background daemon thread.
+    """
+    port = int(os.getenv("PORT", 8080))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, fmt: str, *args: object) -> None:  # suppress logs
+            pass
+
+    srv = HTTPServer(("0.0.0.0", port), _Handler)
+    logger.info("Health-check server listening on port %d", port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
 if __name__ == "__main__":
     validate_livekit_env()
+    _start_health_server()
     cli.run_app(server)

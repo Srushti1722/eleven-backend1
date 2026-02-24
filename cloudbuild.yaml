@@ -1,0 +1,44 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '$_IMAGE_URI'
+      - '.'
+
+  # Push to Container/Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '$_IMAGE_URI'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image=$_IMAGE_URI'
+      - '--region=$_REGION'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--min-instances=1'
+      - '--memory=2Gi'
+      - '--cpu=1'
+
+substitutions:
+  # Override these in Cloud Build trigger or manually
+  _SERVICE_NAME: agent-backend
+  _REGION: us-central1
+  _IMAGE_URI: gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA
+
+# 30-minute timeout — needed because sentence-transformers + chromadb
+# take 15-20 min to install on a fresh build
+timeout: '1800s'
+
+options:
+  # E2_HIGHCPU_8 builds significantly faster than the default E2 machine
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
