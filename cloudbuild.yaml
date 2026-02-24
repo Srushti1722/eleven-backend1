@@ -5,16 +5,15 @@ steps:
     entrypoint: 'bash'
     args: ['-c', 'docker pull $_BASE_IMAGE_URI || true']
 
-  # Build the base image — cache hit after the first time, takes ~30 sec
+  # Build the base image — try with cache first, fall back to clean build
+  # (fallback needed on first run when no cache image exists yet)
   - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
     args:
-      - 'build'
-      - '--cache-from=$_BASE_IMAGE_URI'
-      - '-t'
-      - '$_BASE_IMAGE_URI'
-      - '-f'
-      - 'Dockerfile.base'
-      - '.'
+      - '-c'
+      - |
+        docker build --cache-from=$_BASE_IMAGE_URI -t $_BASE_IMAGE_URI -f Dockerfile.base . \
+        || docker build -t $_BASE_IMAGE_URI -f Dockerfile.base .
 
   # Push base image so the next build can pull it as cache
   - name: 'gcr.io/cloud-builders/docker'
