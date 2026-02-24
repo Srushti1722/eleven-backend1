@@ -232,14 +232,9 @@ def _start_health_server() -> None:
 
 
 if __name__ == "__main__":
-    _start_health_server()   # must ALWAYS start
-
+    _start_health_server()
     try:
         validate_livekit_env()
-        cli.run_app(server)
     except SystemExit as e:
-        logger.error("Startup blocked due to missing env vars: %s", e)
-        # keep process alive so Cloud Run stays healthy
-        import time
-        while True:
-            time.sleep(60)        # LiveKit agent (blocking)
+        logger.error("Missing LiveKit env vars: %s", e)
+    cli.run_app(server)        # LiveKit agent (blocking)
