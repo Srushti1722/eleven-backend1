@@ -26,30 +26,15 @@ steps:
       - 'gcr.io/$PROJECT_ID/agent-backend:latest'
       - '.'
 
-  # Stage 3: Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      - 'run'
-      - 'deploy'
-      - '$_SERVICE_NAME'
-      - '--image=gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
-      - '--region=$_REGION'
-      - '--platform=managed'
-      - '--allow-unauthenticated'
-      - '--min-instances=1'
-      - '--memory=2Gi'
-      - '--cpu=1'
+  # Deploy step removed — Cloud Build service account lacks Cloud Run Admin role.
+  # After this build succeeds, manually update Cloud Run image to:
+  # gcr.io/PROJECT_ID/agent-backend:latest
 
-# Let Cloud Build push images using its own service account (avoids permission issues)
+# Let Cloud Build push images using its own service account
 images:
   - 'gcr.io/$PROJECT_ID/agent-base:latest'
   - 'gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
   - 'gcr.io/$PROJECT_ID/agent-backend:latest'
-
-substitutions:
-  _SERVICE_NAME: agent-backend
-  _REGION: us-central1
 
 timeout: '3600s'
 
