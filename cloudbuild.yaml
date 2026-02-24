@@ -37,11 +37,15 @@ steps:
       - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:latest'
       - '.'
 
-# Cloud Build pushes via the images field using Artifact Registry (default permissions)
-images:
-  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest'
-  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:$COMMIT_SHA'
-  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:latest'
+  # Push all images inside the build step (uses pre-authenticated Cloud Build credentials)
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        docker push asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest
+        docker push asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:$COMMIT_SHA
+        docker push asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:latest
 
 timeout: '3600s'
 
