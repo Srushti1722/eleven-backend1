@@ -1,14 +1,14 @@
-# Cloud Build passes the pre-built base image via --build-arg.
-# Falls back to python:3.11-slim for local `docker build` without the arg.
-ARG BASE_IMAGE=python:3.11-slim
-FROM ${BASE_IMAGE}
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy only the application code — all deps are already in the base image
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
 
-# Cloud Run injects $PORT; fall back to 8080 for local runs
-EXPOSE 8080
+# Cloud Run requirement
+ENV PORT=8080
 
-CMD ["python", "agent.py", "start"]
+# IMPORTANT: no extra args, no "start"
+CMD ["python", "agent.py"]
