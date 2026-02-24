@@ -3,8 +3,7 @@ livekit-plugins-silero
 livekit-plugins-noise-cancellation
 livekit-plugins-turn-detector
 mem0ai
-chromadb==0.5.23
-tokenizers==0.19.1
+chromadb>=0.6.0
 fastembed
 python-dotenv
 google-generativeai
