@@ -58,9 +58,9 @@ mem0_config = {
         }
     },
     "embedder": {
-        "provider": "huggingface",
+        "provider": "fastembed",
         "config": {
-            "model": "sentence-transformers/all-MiniLM-L6-v2",
+            "model": "BAAI/bge-small-en-v1.5",
         }
     },
     "vector_store": {
