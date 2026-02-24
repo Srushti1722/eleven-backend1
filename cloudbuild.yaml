@@ -1,46 +1,46 @@
 steps:
-  # ── Stage 1: Base image (heavy deps — pip install) ────────────────────────
-  # Pull the cached base image so Docker can reuse its layers
+  # Stage 1: Base image (heavy deps - pip install)
+  # Pull cached base image - silent fail on first run (image does not exist yet)
   - name: 'gcr.io/cloud-builders/docker'
     entrypoint: 'bash'
-    args: ['-c', 'docker pull $_BASE_IMAGE_URI || true']
+    args: ['-c', 'docker pull gcr.io/$PROJECT_ID/agent-base:latest || true']
 
-  # Build the base image — try with cache first, fall back to clean build
-  # (fallback needed on first run when no cache image exists yet)
-  - name: 'gcr.io/cloud-builders/docker'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        docker build --cache-from=$_BASE_IMAGE_URI -t $_BASE_IMAGE_URI -f Dockerfile.base . \
-        || docker build -t $_BASE_IMAGE_URI -f Dockerfile.base .
-
-  # Push base image so the next build can pull it as cache
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', '$_BASE_IMAGE_URI']
-
-  # ── Stage 2: App image (just COPY . . — always fast) ─────────────────────
-  # Build the final image on top of the pre-built base
+  # Build base image - uses cache if available, clean build on first run
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
-      - '--build-arg=BASE_IMAGE=$_BASE_IMAGE_URI'
+      - '--cache-from=gcr.io/$PROJECT_ID/agent-base:latest'
       - '-t'
-      - '$_IMAGE_URI'
+      - 'gcr.io/$PROJECT_ID/agent-base:latest'
+      - '-f'
+      - 'Dockerfile.base'
+      - '.'
+
+  # Push base image so next build can use it as cache
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/agent-base:latest']
+
+  # Stage 2: App image - just COPY . . on top of base (~30 sec)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg=BASE_IMAGE=gcr.io/$PROJECT_ID/agent-base:latest'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
       - '.'
 
   # Push the commit-tagged image used by Cloud Run
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', '$_IMAGE_URI']
+    args: ['push', 'gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA']
 
-  # ── Stage 3: Deploy ───────────────────────────────────────────────────────
+  # Stage 3: Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
       - '$_SERVICE_NAME'
-      - '--image=$_IMAGE_URI'
+      - '--image=gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
       - '--region=$_REGION'
       - '--platform=managed'
       - '--allow-unauthenticated'
@@ -51,11 +51,8 @@ steps:
 substitutions:
   _SERVICE_NAME: agent-backend
   _REGION: us-central1
-  _IMAGE_URI: gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA
-  # Base image stores all pip-installed deps — rebuilt only when requirements.txt changes
-  _BASE_IMAGE_URI: gcr.io/$PROJECT_ID/agent-base:latest
 
-# 60 min for the one-time base build; every build after that is ~3-5 min
+# 60 min for the first cold base build; every subsequent build is ~3-5 min
 timeout: '3600s'
 
 options:
