@@ -1,51 +1,47 @@
 steps:
-  # Stage 1: Pull cached base image (silent fail on first run)
-  - name: 'gcr.io/cloud-builders/docker'
-    entrypoint: 'bash'
-    args: ['-c', 'docker pull gcr.io/$PROJECT_ID/agent-base:latest || true']
-
-  # Stage 1: Build base image with all heavy deps
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '--cache-from=gcr.io/$PROJECT_ID/agent-base:latest'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/agent-base:latest'
-      - '-f'
-      - 'Dockerfile.base'
-      - '.'
-
-  # Stage 2: Build app image on top of base
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '--build-arg=BASE_IMAGE=gcr.io/$PROJECT_ID/agent-base:latest'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/agent-backend:latest'
-      - '.'
-
-  # Configure Docker credentials using gcloud (writes to /root/.docker/config.json)
+  # Create Artifact Registry repo if it does not exist yet
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
-    args: ['-c', 'gcloud auth configure-docker gcr.io --quiet']
-    volumes:
-      - name: 'docker-config'
-        path: '/root/.docker'
-
-  # Push all images using the configured credentials
-  - name: 'gcr.io/cloud-builders/docker'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        docker push gcr.io/$PROJECT_ID/agent-base:latest
-        docker push gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA
-        docker push gcr.io/$PROJECT_ID/agent-backend:latest
-    volumes:
-      - name: 'docker-config'
-        path: '/root/.docker'
+        gcloud artifacts repositories create agent-repo \
+          --repository-format=docker \
+          --location=asia-south1 \
+          --quiet || true
+
+  # Pull cached base image (silent fail on first run)
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args: ['-c', 'docker pull asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest || true']
+
+  # Build base image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--cache-from=asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest'
+      - '-f'
+      - 'Dockerfile.base'
+      - '.'
+
+  # Build app image on top of base
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg=BASE_IMAGE=asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:$COMMIT_SHA'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:latest'
+      - '.'
+
+# Cloud Build pushes via the images field using Artifact Registry (default permissions)
+images:
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-base:latest'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:$COMMIT_SHA'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/agent-repo/agent-backend:latest'
 
 timeout: '3600s'
 
