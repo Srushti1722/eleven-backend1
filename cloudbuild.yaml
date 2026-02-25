@@ -42,5 +42,4 @@ steps:
 images:
   - asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA
 
-options:
-  logging: CLOUD_LOGGING_ONLY
+
