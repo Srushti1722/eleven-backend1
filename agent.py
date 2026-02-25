@@ -1,24 +1,6 @@
-print("=== AGENT PROCESS STARTED ===", flush=True)
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
-def _start_health_server():
-    port = int(os.getenv("PORT", 8080))
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, *args):
-            pass
-
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-_start_health_server()
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -43,10 +25,28 @@ from mem0 import Memory
 import os
 import sys
 import sympy
-
-logger = logging.getLogger("agent-Casey-10be")
 logging.basicConfig(level=logging.INFO)
-load_dotenv()
+logger = logging.getLogger("agent-Casey-10be")
+print("=== AGENT PROCESS STARTED ===", flush=True)
+
+# ---- Health server (ONE time only) ----
+def start_health_server():
+    port = int(os.getenv("PORT", "8080"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    logger.info(f"Health server listening on {port}")
+    server.serve_forever()
+
+Thread(target=start_health_server, daemon=True).start()
 
 
 def _has_cli_ws_url() -> bool:
@@ -184,7 +184,7 @@ server.setup_fnc = prewarm
 
 @server.rtc_session(agent_name="Casey-10be")
 async def entrypoint(ctx: JobContext):
-
+    logger.info("ENTRYPOINT CALLED – agent joining room")
     # ── Get user_id from room metadata or participant identity ──────────────
     user_id = "default_user"  # fallback
     try:
@@ -193,6 +193,7 @@ async def entrypoint(ctx: JobContext):
             if participant.identity:
                 user_id = participant.identity
                 break
+        logger.info("ENTRYPOINT CALLED – agent joining room")
         # Or from room metadata if frontend sets it there
         if ctx.room.metadata:
             import json
@@ -230,16 +231,4 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    validate_livekit_env()
-    _start_health_server()
-
-    # Run LiveKit agent in background so Cloud Run sees the port
-    threading.Thread(
-        target=lambda: cli.run_app(server),
-        daemon=False,
-    ).start()
-
-    # Keep main thread alive
-    import time
-    while True:
-        time.sleep(60)     # LiveKit agent (blocking)
+    cli.run_app(server)
