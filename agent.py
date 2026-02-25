@@ -240,4 +240,6 @@ if __name__ == "__main__":
     validate_livekit_env()
     logger.info("Starting LiveKit agent...")
     sys.argv = ["agent.py", "start"]
+    logging.getLogger("livekit").setLevel(logging.DEBUG)
+    logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
     cli.run_app(server)
