@@ -1,7 +1,7 @@
 import os
 import asyncio
 import threading
-from livekit.agents import WorkerOptions
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 from dotenv import load_dotenv
