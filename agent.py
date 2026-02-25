@@ -1,3 +1,23 @@
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+def _start_health_server():
+    port = int(os.getenv("PORT", 8080))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+_start_health_server()
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -206,29 +226,6 @@ async def entrypoint(ctx: JobContext):
         ),
     )
 
-
-def _start_health_server() -> None:
-    """Minimal HTTP server so Cloud Run considers the container healthy.
-
-    Cloud Run kills containers that do not bind to $PORT within the startup
-    timeout.  The LiveKit agent only makes *outbound* connections, so we
-    spin up a tiny health-check server on a background daemon thread.
-    """
-    port = int(os.getenv("PORT", 8080))
-
-    class _Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self,*args):  # suppress logs
-            pass
-
-    srv = HTTPServer(("0.0.0.0", port), _Handler)
-    logger.info("Health-check server listening on port %d", port)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
 if __name__ == "__main__":
