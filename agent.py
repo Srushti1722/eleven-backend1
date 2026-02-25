@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+from livekit.agents import WorkerOptions
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 from dotenv import load_dotenv
@@ -240,4 +241,11 @@ if __name__ == "__main__":
     logging.getLogger("livekit").setLevel(logging.DEBUG)
     logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
     if "download-files" not in sys.argv:
-        asyncio.run(server.run())
+        asyncio.run(
+            server.run(
+                WorkerOptions(
+                    num_workers=1,
+                    prewarm=1
+                )
+            )
+        )
