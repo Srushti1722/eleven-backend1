@@ -61,9 +61,10 @@ mem0_config = {
         }
     },
     "embedder": {
-        "provider": "fastembed",
+        "provider": "gemini",
         "config": {
-            "model": "BAAI/bge-small-en-v1.5",
+            "model": "models/text-embedding-004",
+            "api_key": os.getenv("GEMINI_API_KEY"),
         }
     },
     "vector_store": {
@@ -89,8 +90,9 @@ def get_memory():
 class DefaultAgent(Agent):
     def __init__(self, user_id: str) -> None:
         self.user_id = user_id
-
+        super().__init__(instructions="PLACEHOLDER")
         # Fetch past memories for this user
+    async def on_enter(self):
         try:
             past_memories = get_memory().search(  # FIX: use get_memory() not memory
                 query="interview session",
@@ -104,8 +106,8 @@ class DefaultAgent(Agent):
             logger.error(f"Failed to fetch memories: {e}")
             memories_text = "This is the first session with this user."
 
-        super().__init__(
-            instructions=f"""You are a friendly, reliable voice assistant that answers questions, explains topics, and completes tasks with available tools.
+        
+        self.update_options(instructions=f"""You are a friendly, reliable voice assistant that answers questions, explains topics, and completes tasks with available tools.
 
 # Memory of this user from past sessions
 {memories_text}
@@ -143,7 +145,6 @@ You are interacting with the user via voice, and must apply the following rules 
 - Protect privacy and minimize sensitive data.""",
         )
 
-    async def on_enter(self):
         await self.session.generate_reply(
             instructions="Greet the user and offer your assistance.",
             allow_interruptions=True,
@@ -164,7 +165,7 @@ You are interacting with the user via voice, and must apply the following rules 
         except Exception as e:
             logger.error(f"Failed to save memory: {e}")
 
-server = AgentServer()
+server = AgentServer(num_idle_processes=0)
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
