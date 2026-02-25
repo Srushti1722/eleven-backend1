@@ -19,20 +19,22 @@ steps:
 
   # 3. Deploy to Cloud Run (still Cloud Build, not your CLI)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: gcloud
-    args:
-      [
-        "run",
-        "deploy",
-        "eleven-backend",
-        "--image",
-        "asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA",
-        "--region",
-        "asia-south1",
-        "--platform",
-        "managed",
-        "--allow-unauthenticated"
-      ]
+  entrypoint: gcloud
+  args:
+    [
+      "run",
+      "deploy",
+      "eleven-backend",
+      "--image",
+      "asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA",
+      "--region",
+      "asia-south1",
+      "--platform",
+      "managed",
+      "--allow-unauthenticated",
+      "--service-account",
+      "712008615735-compute@developer.gserviceaccount.com"
+    ]
 
 images:
   - asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA
