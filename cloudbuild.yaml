@@ -33,7 +33,10 @@ steps:
         "managed",
         "--allow-unauthenticated",
         "--service-account",
-        "712008615735-compute@developer.gserviceaccount.com"
+        "712008615735-compute@developer.gserviceaccount.com",
+        "--project",
+        "ai-project-488008",
+        "--quiet"
       ]
 
 images:
