@@ -35,6 +35,8 @@ def _has_cli_ws_url() -> bool:
 
 
 def validate_livekit_env() -> None:
+    if "download-files" in sys.argv:
+        return
     if _has_cli_ws_url():
         return
     required_vars = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
