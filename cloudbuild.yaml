@@ -36,6 +36,8 @@ steps:
         "712008615735-compute@developer.gserviceaccount.com",
         "--project",
         "ai-project-488008",
+        "--timeout",
+        "300s",
         "--quiet"
       ]
 
