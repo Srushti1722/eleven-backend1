@@ -232,9 +232,16 @@ def _start_health_server() -> None:
 
 
 if __name__ == "__main__":
+    validate_livekit_env()
     _start_health_server()
-    try:
-        validate_livekit_env()
-    except SystemExit as e:
-        logger.error("Missing LiveKit env vars: %s", e)
-    cli.run_app(server)        # LiveKit agent (blocking)
+
+    # Run LiveKit agent in background so Cloud Run sees the port
+    threading.Thread(
+        target=lambda: cli.run_app(server),
+        daemon=False,
+    ).start()
+
+    # Keep main thread alive
+    import time
+    while True:
+        time.sleep(60)     # LiveKit agent (blocking)
