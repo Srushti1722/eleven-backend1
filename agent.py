@@ -29,24 +29,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent-Casey-10be")
 print("=== AGENT PROCESS STARTED ===", flush=True)
 
-# ---- Health server (ONE time only) ----
-def start_health_server():
-    port = int(os.getenv("PORT", "8080"))
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, *args):
-            pass
-
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    logger.info(f"Health server listening on {port}")
-    server.serve_forever()
-
-Thread(target=start_health_server, daemon=True).start()
 
 
 def _has_cli_ws_url() -> bool:
@@ -231,4 +214,28 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    cli.run_app(server)
+    # 1️⃣ Start health server FIRST (blocking until bound)
+    port = int(os.getenv("PORT", "8080"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("0.0.0.0", port), Handler)
+    logger.info(f"Health server bound on port {port}")
+
+    # 2️⃣ Start LiveKit agent in BACKGROUND
+    def run_agent():
+        validate_livekit_env()
+        logger.info("Starting LiveKit agent")
+        cli.run_app(server)
+
+    Thread(target=run_agent, daemon=True).start()
+
+    # 3️⃣ Serve health checks FOREVER (Cloud Run is happy)
+    httpd.serve_forever()
