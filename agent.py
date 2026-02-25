@@ -214,7 +214,6 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    # 1️⃣ Start health server FIRST (blocking until bound)
     port = int(os.getenv("PORT", "8080"))
 
     class Handler(BaseHTTPRequestHandler):
@@ -227,15 +226,15 @@ if __name__ == "__main__":
             pass
 
     httpd = HTTPServer(("0.0.0.0", port), Handler)
-    logger.info(f"Health server bound on port {port}")
+    logger.info(f"Health server running on port {port}")
 
-    # 2️⃣ Start LiveKit agent in BACKGROUND
-    def run_agent():
+    # Run LiveKit agent in background
+    def start_agent():
         validate_livekit_env()
-        logger.info("Starting LiveKit agent")
+        logger.info("Starting LiveKit agent...")
         cli.run_app(server)
 
-    Thread(target=run_agent, daemon=True).start()
+    Thread(target=start_agent, daemon=True).start()
 
-    # 3️⃣ Serve health checks FOREVER (Cloud Run is happy)
+    # Keep health server alive
     httpd.serve_forever()
