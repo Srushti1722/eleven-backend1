@@ -164,7 +164,7 @@ You are interacting with the user via voice, and must apply the following rules 
         except Exception as e:
             logger.error(f"Failed to save memory: {e}")
 
-server = AgentServer(num_idle_processes=0)
+server = AgentServer(num_idle_processes=1)
 
 @server.rtc_session(agent_name="Casey-10be")
 async def entrypoint(ctx: JobContext):
