@@ -1,3 +1,4 @@
+print("=== AGENT PROCESS STARTED ===", flush=True)
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
