@@ -1,15 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.base  –  heavy-dependency layer
+#
+# Build this once (or whenever requirements.txt changes) so that the app
+# image build (Dockerfile) only re-copies code and finishes in seconds.
+#
+# Cloud Build pulls the last pushed image via --cache-from so the full
+# pip install only runs on the very first build or after a requirements change.
+# ─────────────────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps required by chromadb, sentence-transformers, and tokenizers
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
+# ── System deps ────────────────────────────────────────────────────────────
+# build-essential  : needed by some pip packages that compile C extensions
+# curl             : used by Cloud Build health-check probes (belt-and-suspenders)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Python deps ────────────────────────────────────────────────────────────
+# chromadb >= 0.6.0 ships pre-built wheels – no C++ compile (was 60 min with 0.5.23)
+# fastembed replaces sentence-transformers / PyTorch (~800 MB saved)
 COPY requirements.txt .
-
-# Install all heavy dependencies — this layer is cached after the first build
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt

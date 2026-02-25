@@ -1,41 +1,129 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# cloudbuild.yaml
+#
+# WHY these choices were made
+# ────────────────────────────
+# • Uses gcr.io/$PROJECT_ID/ instead of Artifact Registry:
+#     The Cloud Build service account (PROJECT_NUMBER@cloudbuild.gserviceaccount.com)
+#     is granted Storage Admin on GCR automatically by GCP.  Artifact Registry
+#     requires a manual roles/artifactregistry.writer grant – which was the root
+#     cause of every "permission denied" push failure we saw before.
+#
+# • Explicit docker push steps, NOT the `images:` field:
+#     The `images:` field pushes AFTER all steps finish using a separate code path
+#     that can hit different permission checks.  Pushing inside a build step uses
+#     the same credentials that were already working for `docker pull`.
+#
+# • Base-image split (Dockerfile.base + Dockerfile):
+#     chromadb<0.6 and sentence-transformers used to compile C++ / pull PyTorch
+#     and routinely hit the 60-minute timeout.  The heavy pip install now lives in
+#     a cached base image that is only rebuilt when requirements.txt changes.
+#     Normal code-only pushes finish in ~2-3 minutes.
+#
+# • $PROJECT_ID used directly in step args, never inside substitutions: values:
+#     Cloud Build does NOT expand $PROJECT_ID inside user-defined substitution
+#     values.  The variable is only substituted correctly when written inline in
+#     the `args` list.
+# ═══════════════════════════════════════════════════════════════════════════════
+
 steps:
-  # Build image
-  - name: gcr.io/cloud-builders/docker
-    args:
-      [
-        "build",
-        "-t",
-        "asia-south1-docker.pkg.dev/$PROJECT_ID/eleven-repo/eleven-backend:$COMMIT_SHA",
-        "."
-      ]
 
-  # Push image
-  - name: gcr.io/cloud-builders/docker
+  # ── Step 0: Configure Docker credentials ──────────────────────────────────
+  # Belt-and-suspenders: the docker builder is already auth'd but running this
+  # guarantees gcr.io pushes work even if the builder image changes.
+  - id: 'auth-docker'
+    name: 'gcr.io/cloud-builders/gcloud'
     args:
-      [
-        "push",
-        "asia-south1-docker.pkg.dev/$PROJECT_ID/eleven-repo/eleven-backend:$COMMIT_SHA"
-      ]
+      - auth
+      - configure-docker
+      - '--quiet'
 
-  # Deploy to Cloud Run (still Cloud Build, NOT your CLI)
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: gcloud
+  # ── Step 1: Pull cached base image ────────────────────────────────────────
+  # Silently fails on the very first build (image doesn't exist yet).
+  # On subsequent builds this populates the local Docker cache so Step 2
+  # can use --cache-from and skip layers that haven't changed.
+  - id: 'pull-base-cache'
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
     args:
-      [
-        "run",
-        "deploy",
-        "eleven-backend",
-        "--image",
-        "asia-south1-docker.pkg.dev/$PROJECT_ID/eleven-repo/eleven-backend:$COMMIT_SHA",
-        "--region",
-        "asia-south1",
-        "--platform",
-        "managed",
-        "--allow-unauthenticated"
-      ]
+      - '-c'
+      - 'docker pull gcr.io/$PROJECT_ID/agent-base:latest || true'
 
-images:
-  - asia-south1-docker.pkg.dev/$PROJECT_ID/eleven-repo/eleven-backend:$COMMIT_SHA
+  # ── Step 2: Build base image ───────────────────────────────────────────────
+  # Contains all pip packages.  Rebuilds only when requirements.txt changes
+  # because Docker layer cache is warm from the pull above.
+  - id: 'build-base'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '--file=Dockerfile.base'
+      - '--cache-from=gcr.io/$PROJECT_ID/agent-base:latest'
+      - '--tag=gcr.io/$PROJECT_ID/agent-base:latest'
+      - .
+
+  # ── Step 3: Push base image ────────────────────────────────────────────────
+  # Stores the freshly built base so Step 1 can use it as cache next time.
+  - id: 'push-base'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - 'gcr.io/$PROJECT_ID/agent-base:latest'
+
+  # ── Step 4: Build app image ────────────────────────────────────────────────
+  # Thin layer: just copies application code on top of the cached base.
+  # Typically completes in < 30 seconds.
+  - id: 'build-app'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '--build-arg=BASE_IMAGE=gcr.io/$PROJECT_ID/agent-base:latest'
+      - '--tag=gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
+      - '--tag=gcr.io/$PROJECT_ID/agent-backend:latest'
+      - .
+
+  # ── Step 5: Push app image (both tags) ────────────────────────────────────
+  # Push the commit-SHA tag first (immutable reference), then latest.
+  - id: 'push-app-sha'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - 'gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
+
+  - id: 'push-app-latest'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - 'gcr.io/$PROJECT_ID/agent-backend:latest'
+
+  # ── Step 6: Deploy to Cloud Run ───────────────────────────────────────────
+  # Uses the commit-SHA tag so every deployment is pinned to an exact image.
+  # --min-instances=1 keeps the agent alive and ready to join LiveKit rooms
+  #   without cold-start delay.
+  # Env vars (LIVEKIT_URL, LIVEKIT_API_KEY, etc.) are NOT set here to avoid
+  #   embedding secrets in source.  Set them once via the Cloud Run console
+  #   or: gcloud run services update agent-backend --region=asia-south1
+  #       --set-env-vars="LIVEKIT_URL=...,LIVEKIT_API_KEY=...,..."
+  - id: 'deploy'
+    name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - run
+      - deploy
+      - agent-backend
+      - '--image=gcr.io/$PROJECT_ID/agent-backend:$COMMIT_SHA'
+      - '--region=asia-south1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--port=8080'
+      - '--cpu=2'
+      - '--memory=2Gi'
+      - '--concurrency=1'
+      - '--min-instances=1'
+      - '--max-instances=3'
+      - '--timeout=300'
+
+timeout: '3600s'
 
 options:
+  machineType: 'E2_HIGHCPU_8'
+  # Send logs to Cloud Logging only (faster, no GCS bucket permission needed)
   logging: CLOUD_LOGGING_ONLY
