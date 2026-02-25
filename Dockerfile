@@ -3,6 +3,7 @@ FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
 COPY . .
 RUN python agent.py download-files
 EXPOSE 8080
