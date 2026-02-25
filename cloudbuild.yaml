@@ -4,11 +4,11 @@ steps:
     args:
       [
         "build",
+        "--no-cache",
         "-t",
         "asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA",
         "."
       ]
-
   # 2. Push image
   - name: gcr.io/cloud-builders/docker
     args:
@@ -16,8 +16,7 @@ steps:
         "push",
         "asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA"
       ]
-
-  # 3. Deploy to Cloud Run (still Cloud Build, not your CLI)
+  # 3. Deploy to Cloud Run
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
@@ -40,7 +39,6 @@ steps:
         "300s",
         "--quiet"
       ]
-
 images:
   - asia-south1-docker.pkg.dev/ai-project-488008/cloud-run-source-deploy/eleven-backend:$COMMIT_SHA
 options:
