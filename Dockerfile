@@ -31,4 +31,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8080}/ || exit 1
 
-CMD ["python", "agent.py", "start"]
+CMD ["python", "agent.py"]
