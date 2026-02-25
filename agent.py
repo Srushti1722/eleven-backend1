@@ -239,4 +239,5 @@ if __name__ == "__main__":
     logger.info("Starting LiveKit agent...")
     logging.getLogger("livekit").setLevel(logging.DEBUG)
     logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
-    asyncio.run(server.run())
+    if "download-files" not in sys.argv:
+        asyncio.run(server.run())
