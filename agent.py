@@ -25,7 +25,7 @@ import sympy
 
 logger = logging.getLogger("agent-Casey-10be")
 logging.basicConfig(level=logging.INFO)
-load_dotenv(".env.local")
+load_dotenv()
 
 
 def _has_cli_ws_url() -> bool:
@@ -217,16 +217,16 @@ def _start_health_server() -> None:
     port = int(os.getenv("PORT", 8080))
 
     class _Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self):  # noqa: N802
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
 
-        def log_message(self, fmt: str, *args: object) -> None:  # suppress logs
+        def log_message(self,*args):  # suppress logs
             pass
 
-    srv = HTTPServer(("", port), _Handler)
+    srv = HTTPServer(("0.0.0.0", port), _Handler)
     logger.info("Health-check server listening on port %d", port)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
