@@ -234,7 +234,7 @@ if __name__ == "__main__":
         logger.info("Starting LiveKit agent...")
         cli.run_app(server)
 
-    Thread(target=start_agent, daemon=True).start()
+    threading.Thread(target=start_agent, daemon=True).start()
 
     # Keep health server alive
     httpd.serve_forever()
