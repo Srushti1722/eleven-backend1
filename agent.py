@@ -18,7 +18,7 @@ from livekit.plugins import (
     noise_cancellation,
     silero,
 )
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
 from mem0 import Memory
 import sys
 
@@ -200,7 +200,6 @@ async def entrypoint(ctx: JobContext):
             voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
             language="en"
         ),
-        turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )
