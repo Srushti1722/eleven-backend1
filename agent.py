@@ -226,21 +226,17 @@ if __name__ == "__main__":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-
         def log_message(self, *args):
             pass
 
     httpd = HTTPServer(("0.0.0.0", port), Handler)
     logger.info(f"Health server running on port {port}")
 
-    # Run LiveKit agent in background
-    def start_agent():
-        validate_livekit_env()
-        logger.info("Starting LiveKit agent...")
-        sys.argv = ["agent.py", "start"]
-        cli.run_app(server)
+    # Health server runs in background thread
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
-    threading.Thread(target=start_agent, daemon=True).start()
-
-    # Keep health server alive
-    httpd.serve_forever()
+    # LiveKit agent runs on main thread (required for signal handling)
+    validate_livekit_env()
+    logger.info("Starting LiveKit agent...")
+    sys.argv = ["agent.py", "start"]
+    cli.run_app(server)
