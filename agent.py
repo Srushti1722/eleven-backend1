@@ -237,6 +237,7 @@ if __name__ == "__main__":
     def start_agent():
         validate_livekit_env()
         logger.info("Starting LiveKit agent...")
+        sys.argv = ["agent.py", "start"]
         cli.run_app(server)
 
     threading.Thread(target=start_agent, daemon=True).start()
