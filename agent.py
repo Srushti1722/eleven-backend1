@@ -77,8 +77,13 @@ mem0_config = {
     "version": "v1.1"
 }
 
+memory = None
 
-memory = Memory.from_config(mem0_config)
+def get_memory():
+    global memory
+    if memory is None:
+        memory = Memory.from_config(mem0_config)
+    return memory
 # ──────────────────────────────────────────────────────────────────────────────
 
 
