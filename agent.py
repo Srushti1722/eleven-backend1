@@ -1,4 +1,5 @@
 import os
+import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
@@ -238,4 +239,4 @@ if __name__ == "__main__":
     logger.info("Starting LiveKit agent...")
     logging.getLogger("livekit").setLevel(logging.DEBUG)
     logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
-    server.run()
+    asyncio.run(server.run())
