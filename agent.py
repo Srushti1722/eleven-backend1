@@ -238,10 +238,4 @@ if __name__ == "__main__":
     logger.info("Starting LiveKit agent...")
     logging.getLogger("livekit").setLevel(logging.DEBUG)
     logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
-    cli.run_app(
-        server,
-        WorkerOptions(
-            num_workers=1,
-            prewarm=1
-        )
-    )
+    cli.run_app()
