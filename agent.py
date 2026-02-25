@@ -25,7 +25,7 @@ import sys
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent-Casey-10be")
 print("=== AGENT PROCESS STARTED ===", flush=True)
-
+load_dotenv()
 
 def _has_cli_ws_url() -> bool:
     return any(
@@ -162,8 +162,10 @@ You are interacting with the user via voice, and must apply the following rules 
         except Exception as e:
             logger.error(f"Failed to save memory: {e}")
 
-
-server = AgentServer()
+server = AgentServer(
+    num_workers=1,   # REQUIRED
+    prewarm=1        # 🔥 THIS FIXES THE ERROR
+)
 
 
 def prewarm(proc: JobProcess):
@@ -238,7 +240,6 @@ if __name__ == "__main__":
     # LiveKit agent on main thread (signal handling requires main thread)
     validate_livekit_env()
     logger.info("Starting LiveKit agent...")
-    sys.argv = ["agent.py", "start"]
     logging.getLogger("livekit").setLevel(logging.DEBUG)
     logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
     cli.run_app(server)
