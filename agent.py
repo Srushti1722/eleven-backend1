@@ -11,7 +11,6 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     JobContext,
-    JobProcess,
     cli,
     inference,
     room_io,
@@ -167,13 +166,6 @@ You are interacting with the user via voice, and must apply the following rules 
 
 server = AgentServer(num_idle_processes=0)
 
-def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
-
-
-server.setup_fnc = prewarm
-
-
 @server.rtc_session(agent_name="Casey-10be")
 async def entrypoint(ctx: JobContext):
     logger.info("ENTRYPOINT CALLED – agent joining room")
@@ -201,7 +193,7 @@ async def entrypoint(ctx: JobContext):
             voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
             language="en"
         ),
-        vad=ctx.proc.userdata["vad"],
+        vad=silero.VAD.load(),
         preemptive_generation=True,
     )
 
