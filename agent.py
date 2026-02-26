@@ -167,7 +167,7 @@ def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
 server = AgentServer(
     num_idle_processes=1,
-    max_concurrent_jobs=5, 
+    max_concurrent_jobs=2, 
 )
 server.setup_fnc = prewarm
 
