@@ -166,7 +166,7 @@ You are interacting with the user via voice, and must apply the following rules 
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
 server = AgentServer(
-    num_idle_processes=1,
+    num_idle_processes=0,
     max_concurrent_jobs=2, 
 )
 server.setup_fnc = prewarm
