@@ -61,12 +61,10 @@ mem0_config = {
             "api_key": os.getenv("GEMINI_API_KEY"),
         }
     },
-    # FIX 2: switched embedder from 'gemini' provider to 'litellm'
-    # to avoid "cannot import name 'genai' from 'google'" error
     "embedder": {
-        "provider": "litellm",
+        "provider": "gemini",
         "config": {
-            "model": "gemini/text-embedding-004",
+            "model": "models/text-embedding-004",
             "api_key": os.getenv("GEMINI_API_KEY"),
         }
     },
@@ -130,8 +128,12 @@ def extract_transcript(session_history) -> list:
     """
     transcript = []
     try:
-        # ChatContext exposes messages via .messages property
-        messages = session_history.messages if hasattr(session_history, "messages") else list(session_history)
+        # ChatContext may expose messages as a property or a method
+        if hasattr(session_history, "messages"):
+            m = session_history.messages
+            messages = m() if callable(m) else m
+        else:
+            messages = list(session_history)
         for msg in messages:
             if not (hasattr(msg, "role") and hasattr(msg, "content")):
                 continue
