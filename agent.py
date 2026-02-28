@@ -62,10 +62,10 @@ mem0_config = {
         }
     },
     "embedder": {
-        "provider": "gemini",
+        "provider": "openai",
         "config": {
-            "model": "models/text-embedding-004",
-            "api_key": os.getenv("GEMINI_API_KEY"),
+            "model": "text-embedding-3-small",
+            "api_key": os.getenv("OPENAI_API_KEY"),
         }
     },
     "vector_store": {
