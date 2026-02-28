@@ -51,8 +51,6 @@ def validate_livekit_env() -> None:
 
 
 # ─── mem0 setup ───────────────────────────────────────────────────────────────
-# IMPORTANT: On Cloud Run, chroma_db must be on a persistent volume.
-# Set env var CHROMA_DB_PATH to a mounted volume path e.g. /mnt/data/chroma_db
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 
 mem0_config = {
@@ -63,10 +61,12 @@ mem0_config = {
             "api_key": os.getenv("GEMINI_API_KEY"),
         }
     },
+    # FIX 2: switched embedder from 'gemini' provider to 'litellm'
+    # to avoid "cannot import name 'genai' from 'google'" error
     "embedder": {
-        "provider": "gemini",
+        "provider": "litellm",
         "config": {
-            "model": "models/text-embedding-004",
+            "model": "gemini/text-embedding-004",
             "api_key": os.getenv("GEMINI_API_KEY"),
         }
     },
@@ -94,7 +94,6 @@ def fetch_all_user_memories(user_id: str) -> str:
     """Retrieve every stored memory for a user across all past sessions."""
     mem = get_memory()
 
-    # Strategy 1: get_all — returns everything stored for the user, no query needed
     try:
         result = mem.get_all(user_id=user_id)
         entries = result.get("results", []) if isinstance(result, dict) else (result or [])
@@ -105,7 +104,6 @@ def fetch_all_user_memories(user_id: str) -> str:
     except Exception as e:
         logger.warning(f"[mem0] get_all failed: {e} — trying search fallback")
 
-    # Strategy 2: multi-query search fallback
     try:
         queries = ["remember", "user said", "number", "name", "session", "topic", "preference"]
         seen, lines = set(), []
@@ -125,15 +123,19 @@ def fetch_all_user_memories(user_id: str) -> str:
     return ""
 
 
-def save_memory_now(user_id: str, session_history) -> bool:
-    """Extract transcript from session history and save to mem0. Returns True on success."""
+def extract_transcript(session_history) -> list:
+    """
+    FIX 1: session.history is a ChatContext object, not a plain list.
+    We must call .messages to get the list of ChatMessage objects.
+    """
+    transcript = []
     try:
-        transcript = []
-        for msg in session_history:
+        # ChatContext exposes messages via .messages property
+        messages = session_history.messages if hasattr(session_history, "messages") else list(session_history)
+        for msg in messages:
             if not (hasattr(msg, "role") and hasattr(msg, "content")):
                 continue
             content = msg.content
-            # Flatten list-type content blocks
             if isinstance(content, list):
                 content = " ".join(
                     (block.get("text", "") if isinstance(block, dict) else str(block))
@@ -141,12 +143,19 @@ def save_memory_now(user_id: str, session_history) -> bool:
                 ).strip()
             content = str(content).strip()
             if content:
-                transcript.append({"role": msg.role, "content": content})
+                transcript.append({"role": str(msg.role).replace("Role.", "").lower(), "content": content})
+    except Exception as e:
+        logger.error(f"[mem0] Failed to extract transcript: {e}")
+    return transcript
 
+
+def save_memory_now(user_id: str, session_history) -> bool:
+    """Save transcript to mem0. Returns True on success."""
+    try:
+        transcript = extract_transcript(session_history)
         if not transcript:
             logger.warning(f"[mem0] No transcript to save for '{user_id}'")
             return False
-
         get_memory().add(transcript, user_id=user_id)
         logger.info(f"[mem0] Saved {len(transcript)} messages for '{user_id}'")
         return True
@@ -156,29 +165,8 @@ def save_memory_now(user_id: str, session_history) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class DefaultAgent(Agent):
-    def __init__(self, user_id: str) -> None:
-        self.user_id = user_id
-        # Save memory every 60s mid-session so data isn't lost if session drops
-        self._memory_save_interval = int(os.getenv("MEMORY_SAVE_INTERVAL", "60"))
-        self._save_task: asyncio.Task | None = None
-        super().__init__(instructions="PLACEHOLDER")
-
-    async def on_enter(self):
-        # ── Load all past memories ──────────────────────────────────────────
-        try:
-            memories_text = fetch_all_user_memories(self.user_id)
-            is_first_session = not memories_text
-            if is_first_session:
-                memories_text = "No previous sessions — this is the user's first session."
-        except Exception as e:
-            logger.error(f"[mem0] on_enter fetch error: {e}")
-            memories_text = "Memory unavailable right now."
-            is_first_session = True
-
-        # ── System prompt ───────────────────────────────────────────────────
-        # CRITICAL: explicitly override the LLM's default belief that it has no memory.
-        self.update_options(instructions=f"""You are Casey, a friendly and reliable voice assistant.
+def build_instructions(memories_text: str) -> str:
+    return f"""You are Casey, a friendly and reliable voice assistant.
 
 # MEMORY SYSTEM — READ CAREFULLY
 You are equipped with a persistent external memory system (mem0) that stores and retrieves information across sessions.
@@ -210,32 +198,33 @@ If the user shares new information, acknowledge it and confirm you will remember
 # Guardrails
 - Safe, lawful, appropriate use only. Decline harmful requests.
 - Medical, legal, financial: general info only, suggest a professional.
-- Protect user privacy.""",
-        )
+- Protect user privacy."""
 
-        # ── Start periodic mid-session save ────────────────────────────────
+
+class DefaultAgent(Agent):
+    def __init__(self, user_id: str, instructions: str) -> None:
+        self.user_id = user_id
+        self._memory_save_interval = int(os.getenv("MEMORY_SAVE_INTERVAL", "60"))
+        self._save_task: asyncio.Task | None = None
+        # FIX 3: pass instructions to parent __init__ directly instead of using
+        # update_options() which doesn't exist on this version of Agent
+        super().__init__(instructions=instructions)
+
+    async def on_enter(self):
+        # Start periodic mid-session save
         self._save_task = asyncio.create_task(self._periodic_save())
 
-        # ── Greet user ─────────────────────────────────────────────────────
-        if is_first_session:
-            greeting = (
-                "Greet the user for the first time. "
-                "Tell them you have a memory system and will remember what they share across future sessions."
-            )
-        else:
-            greeting = (
-                "Welcome the user back warmly. "
-                "Briefly mention one or two specific things you remember from their past sessions. "
-                "Then ask how you can help today."
-            )
-
         await self.session.generate_reply(
-            instructions=greeting,
+            instructions=(
+                "Greet the user. If the system prompt contains past memory about them, "
+                "welcome them back and briefly mention what you remember. "
+                "If no past memory exists, greet them for the first time and tell them "
+                "you have a memory system that will remember what they share across future sessions."
+            ),
             allow_interruptions=True,
         )
 
     async def _periodic_save(self):
-        """Save memory periodically mid-session in case of abrupt disconnection."""
         try:
             while True:
                 await asyncio.sleep(self._memory_save_interval)
@@ -245,7 +234,6 @@ If the user shares new information, acknowledge it and confirm you will remember
             pass
 
     async def on_exit(self):
-        # Cancel periodic task
         if self._save_task and not self._save_task.done():
             self._save_task.cancel()
             try:
@@ -253,14 +241,12 @@ If the user shares new information, acknowledge it and confirm you will remember
             except asyncio.CancelledError:
                 pass
 
-        # Final save on clean exit
         logger.info(f"[mem0] Final save on session exit for '{self.user_id}'")
         save_memory_now(self.user_id, self.session.history)
 
 
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
-    # Pre-initialise memory at startup to avoid delay on first session
     try:
         get_memory()
         logger.info("[mem0] Memory initialised during prewarm")
@@ -278,7 +264,6 @@ async def entrypoint(ctx: JobContext):
 
     user_id = "default_user"
     try:
-        # Priority 1: room metadata (most explicit and reliable)
         if ctx.room.metadata:
             try:
                 meta = json.loads(ctx.room.metadata)
@@ -289,7 +274,6 @@ async def entrypoint(ctx: JobContext):
             except Exception:
                 pass
 
-        # Priority 2: participant identity
         if user_id == "default_user":
             for participant in ctx.room.remote_participants.values():
                 if participant.identity:
@@ -300,6 +284,17 @@ async def entrypoint(ctx: JobContext):
         logger.warning(f"Could not resolve user_id: {e}")
 
     logger.info(f"Session started — user_id: {user_id}")
+
+    # Load memories BEFORE creating the agent so instructions are set at init time
+    try:
+        memories_text = fetch_all_user_memories(user_id)
+        if not memories_text:
+            memories_text = "No previous sessions — this is the user's first session."
+    except Exception as e:
+        logger.error(f"[mem0] Failed to fetch memories at entrypoint: {e}")
+        memories_text = "Memory unavailable right now."
+
+    instructions = build_instructions(memories_text)
 
     session = AgentSession(
         stt=inference.STT(model="assemblyai/universal-streaming", language="en"),
@@ -314,7 +309,7 @@ async def entrypoint(ctx: JobContext):
     )
 
     await session.start(
-        agent=DefaultAgent(user_id=user_id),
+        agent=DefaultAgent(user_id=user_id, instructions=instructions),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
