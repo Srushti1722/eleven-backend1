@@ -6,5 +6,6 @@ mem0ai
 chromadb>=0.6.0
 fastembed
 python-dotenv
-google-generativeai
 litellm
+google-generativeai
+googleapis-common-protos
