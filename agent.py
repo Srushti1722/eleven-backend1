@@ -91,23 +91,44 @@ def get_memory() -> Memory:
 def fetch_all_user_memories(user_id: str) -> str:
     """Retrieve every stored memory for a user across all past sessions."""
     mem = get_memory()
+    logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
 
+    # FIX: Handle both list and dict return types from get_all
     try:
         result = mem.get_all(user_id=user_id)
-        entries = result.get("results", []) if isinstance(result, dict) else (result or [])
+        logger.info(f"[mem0] get_all raw result type: {type(result)}, value: {result}")
+
+        # mem0 can return either a list directly OR a dict with 'results' key
+        if isinstance(result, list):
+            entries = result
+        elif isinstance(result, dict):
+            entries = result.get("results", [])
+        else:
+            entries = []
+
         if entries:
             lines = [f"- {m['memory']}" for m in entries if m.get("memory")]
             logger.info(f"[mem0] Loaded {len(lines)} memories for '{user_id}' via get_all")
             return "\n".join(lines)
+        else:
+            logger.info(f"[mem0] No memories found for '{user_id}' via get_all")
     except Exception as e:
         logger.warning(f"[mem0] get_all failed: {e} — trying search fallback")
 
+    # Fallback: broad search queries
     try:
-        queries = ["remember", "user said", "number", "name", "session", "topic", "preference"]
+        queries = ["remember", "user said", "number", "name", "session", "topic", "preference", "phone", "address"]
         seen, lines = set(), []
         for q in queries:
             res = mem.search(query=q, user_id=user_id, limit=20)
-            for m in (res.get("results", []) if isinstance(res, dict) else []):
+            logger.info(f"[mem0] search('{q}') returned: {type(res)}")
+            if isinstance(res, list):
+                items = res
+            elif isinstance(res, dict):
+                items = res.get("results", [])
+            else:
+                items = []
+            for m in items:
                 key = m.get("id", m.get("memory", ""))
                 if key and key not in seen:
                     seen.add(key)
@@ -121,19 +142,36 @@ def fetch_all_user_memories(user_id: str) -> str:
     return ""
 
 
+def _normalize_role(role) -> str:
+    """
+    FIX: Robustly normalize any role object/string to 'user' or 'assistant'.
+    Handles: Role.USER, ChatMessageRole.user, "user", "assistant", etc.
+    """
+    raw = str(role).lower()
+    # Strip enum class prefix patterns like "role.", "chatmessagerole.", etc.
+    if "." in raw:
+        raw = raw.split(".")[-1]
+    # Map known variants
+    if raw in ("user", "human"):
+        return "user"
+    if raw in ("assistant", "ai", "system", "model"):
+        return "assistant"
+    # Default fallback: return as-is so logs help debug
+    logger.warning(f"[mem0] Unknown role '{role}' -> defaulting to 'user'")
+    return "user"
+
+
 def extract_transcript(session_history) -> list:
-    """
-    FIX 1: session.history is a ChatContext object, not a plain list.
-    We must call .messages to get the list of ChatMessage objects.
-    """
+    """Extract a clean transcript list from the session's ChatContext."""
     transcript = []
     try:
-        # ChatContext may expose messages as a property or a method
+        # ChatContext exposes messages as property or method
         if hasattr(session_history, "messages"):
             m = session_history.messages
             messages = m() if callable(m) else m
         else:
             messages = list(session_history)
+
         for msg in messages:
             if not (hasattr(msg, "role") and hasattr(msg, "content")):
                 continue
@@ -145,7 +183,11 @@ def extract_transcript(session_history) -> list:
                 ).strip()
             content = str(content).strip()
             if content:
-                transcript.append({"role": str(msg.role).replace("Role.", "").lower(), "content": content})
+                # FIX: Use robust role normalizer
+                role = _normalize_role(msg.role)
+                transcript.append({"role": role, "content": content})
+
+        logger.info(f"[mem0] Extracted {len(transcript)} messages from transcript")
     except Exception as e:
         logger.error(f"[mem0] Failed to extract transcript: {e}")
     return transcript
@@ -158,8 +200,9 @@ def save_memory_now(user_id: str, session_history) -> bool:
         if not transcript:
             logger.warning(f"[mem0] No transcript to save for '{user_id}'")
             return False
+        logger.info(f"[mem0] Saving {len(transcript)} messages for user_id='{user_id}'")
         get_memory().add(transcript, user_id=user_id)
-        logger.info(f"[mem0] Saved {len(transcript)} messages for '{user_id}'")
+        logger.info(f"[mem0] Successfully saved memories for '{user_id}'")
         return True
     except Exception as e:
         logger.error(f"[mem0] Failed to save memory for '{user_id}': {e}")
@@ -208,12 +251,9 @@ class DefaultAgent(Agent):
         self.user_id = user_id
         self._memory_save_interval = int(os.getenv("MEMORY_SAVE_INTERVAL", "60"))
         self._save_task: asyncio.Task | None = None
-        # FIX 3: pass instructions to parent __init__ directly instead of using
-        # update_options() which doesn't exist on this version of Agent
         super().__init__(instructions=instructions)
 
     async def on_enter(self):
-        # Start periodic mid-session save
         self._save_task = asyncio.create_task(self._periodic_save())
 
         await self.session.generate_reply(
@@ -264,6 +304,8 @@ server.setup_fnc = prewarm
 async def entrypoint(ctx: JobContext):
     logger.info("ENTRYPOINT CALLED – agent joining room")
 
+    # FIX: Use a STABLE, CONSISTENT user_id — default to a fixed ID if nothing
+    # else is available, so memories always save/load under the same key.
     user_id = "default_user"
     try:
         if ctx.room.metadata:
@@ -272,26 +314,30 @@ async def entrypoint(ctx: JobContext):
                 uid = meta.get("user_id", "")
                 if uid:
                     user_id = uid
-                    logger.info(f"user_id from metadata: {user_id}")
-            except Exception:
-                pass
+                    logger.info(f"[mem0] user_id from metadata: '{user_id}'")
+            except Exception as parse_err:
+                logger.warning(f"[mem0] Failed to parse room metadata: {parse_err}")
 
         if user_id == "default_user":
             for participant in ctx.room.remote_participants.values():
                 if participant.identity:
                     user_id = participant.identity
-                    logger.info(f"user_id from participant: {user_id}")
+                    logger.info(f"[mem0] user_id from participant identity: '{user_id}'")
                     break
     except Exception as e:
-        logger.warning(f"Could not resolve user_id: {e}")
+        logger.warning(f"[mem0] Could not resolve user_id: {e}")
 
-    logger.info(f"Session started — user_id: {user_id}")
+    # IMPORTANT: Log the final user_id so you can verify it's consistent across sessions
+    logger.info(f"[mem0] *** FINAL user_id for this session: '{user_id}' ***")
 
-    # Load memories BEFORE creating the agent so instructions are set at init time
+    # Load memories BEFORE creating the agent
     try:
         memories_text = fetch_all_user_memories(user_id)
         if not memories_text:
             memories_text = "No previous sessions — this is the user's first session."
+            logger.info(f"[mem0] No memories found for '{user_id}' — treating as new user")
+        else:
+            logger.info(f"[mem0] Loaded memories for '{user_id}':\n{memories_text}")
     except Exception as e:
         logger.error(f"[mem0] Failed to fetch memories at entrypoint: {e}")
         memories_text = "Memory unavailable right now."
