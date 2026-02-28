@@ -2,8 +2,12 @@ ARG BASE_IMAGE=python:3.11-slim
 FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
-RUN python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
+
+# FIX: removed 2>/dev/null || true so install errors are visible and fatal
+# Also force reinstall google packages to fix namespace conflicts
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --force-reinstall google-generativeai
+
 COPY . .
 RUN python agent.py download-files
 EXPOSE 8080
