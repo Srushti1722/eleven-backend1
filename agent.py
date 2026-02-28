@@ -83,6 +83,47 @@ def get_memory():
     if _memory is None:
         _memory = Memory.from_config(mem0_config)
     return _memory
+
+
+def fetch_all_user_memories(user_id: str) -> str:
+    """
+    Fetch ALL memories for a user (not just by query) so nothing is missed
+    across sessions. Falls back to a broad search if get_all is unavailable.
+    """
+    mem = get_memory()
+    memories_text = ""
+
+    # Strategy 1: get_all — retrieves every stored memory for the user
+    try:
+        result = mem.get_all(user_id=user_id)
+        entries = result.get("results", []) if isinstance(result, dict) else result
+        if entries:
+            memories_text = "\n".join(f"- {m['memory']}" for m in entries)
+            logger.info(f"Loaded {len(entries)} memories for user {user_id} via get_all")
+            return memories_text
+    except Exception as e:
+        logger.warning(f"get_all failed ({e}), falling back to search")
+
+    # Strategy 2: broad search fallback
+    try:
+        broad_queries = ["conversation", "user", "session", "remember", "number", "topic"]
+        seen = set()
+        lines = []
+        for q in broad_queries:
+            res = mem.search(query=q, user_id=user_id, limit=20)
+            for m in res.get("results", []):
+                mem_id = m.get("id", m["memory"])
+                if mem_id not in seen:
+                    seen.add(mem_id)
+                    lines.append(f"- {m['memory']}")
+        if lines:
+            memories_text = "\n".join(lines)
+            logger.info(f"Loaded {len(lines)} memories for user {user_id} via search fallback")
+            return memories_text
+    except Exception as e:
+        logger.error(f"Memory search fallback also failed: {e}")
+
+    return ""
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -90,28 +131,26 @@ class DefaultAgent(Agent):
     def __init__(self, user_id: str) -> None:
         self.user_id = user_id
         super().__init__(instructions="PLACEHOLDER")
-        # Fetch past memories for this user
+
     async def on_enter(self):
+        # Fetch ALL past memories for this user across all previous sessions
         try:
-            past_memories = get_memory().search(  # FIX: use get_memory() not memory
-                query="interview session",
-                user_id=self.user_id,
-                limit=10
-            )
-            memories_text = "\n".join(
-                f"- {m['memory']}" for m in past_memories.get("results", [])
-            ) or "This is the first session with this user."
+            memories_text = fetch_all_user_memories(self.user_id)
+            if not memories_text:
+                memories_text = "This is the first session with this user."
         except Exception as e:
             logger.error(f"Failed to fetch memories: {e}")
             memories_text = "This is the first session with this user."
 
-        
+        logger.info(f"Memories loaded for {self.user_id}:\n{memories_text}")
+
         self.update_options(instructions=f"""You are a friendly, reliable voice assistant that answers questions, explains topics, and completes tasks with available tools.
 
 # Memory of this user from past sessions
 {memories_text}
 
-Use this memory to personalise your responses. If this is an interview context, ask progressively harder questions based on what the user already knows.
+Use this memory to personalise your responses. If the user previously shared information (like a number, name, preference, or topic), reference it naturally — do not ask again for things already known.
+If this is an interview context, ask progressively harder questions based on what the user already knows.
 
 # Output rules
 
@@ -145,29 +184,43 @@ You are interacting with the user via voice, and must apply the following rules 
         )
 
         await self.session.generate_reply(
-            instructions="Greet the user and offer your assistance.",
+            instructions="Greet the user warmly. If you have memories of them, briefly acknowledge what you remember (e.g. 'Welcome back! Last time we talked about...'). Otherwise greet them for the first time and offer your assistance.",
             allow_interruptions=True,
         )
 
     async def on_exit(self):
+        """Save the full conversation transcript to mem0 on session end."""
         try:
             transcript = []
             for msg in self.session.history:
                 if hasattr(msg, 'role') and hasattr(msg, 'content'):
-                    transcript.append({
-                        "role": msg.role,
-                        "content": msg.content
-                    })
+                    content = msg.content
+                    # Flatten content if it's a list of blocks
+                    if isinstance(content, list):
+                        content = " ".join(
+                            block.get("text", "") if isinstance(block, dict) else str(block)
+                            for block in content
+                        )
+                    if content and str(content).strip():
+                        transcript.append({
+                            "role": msg.role,
+                            "content": str(content).strip()
+                        })
+
             if transcript:
-                get_memory().add(transcript, user_id=self.user_id)  # FIX: use get_memory()
-                logger.info(f"Memory saved for user: {self.user_id}")
+                get_memory().add(transcript, user_id=self.user_id)
+                logger.info(f"Memory saved for user: {self.user_id} ({len(transcript)} messages)")
+            else:
+                logger.warning(f"No transcript to save for user: {self.user_id}")
         except Exception as e:
             logger.error(f"Failed to save memory: {e}")
+
+
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
+
 server = AgentServer(
     num_idle_processes=0,
-    
 )
 server.setup_fnc = prewarm
 
@@ -177,14 +230,23 @@ async def entrypoint(ctx: JobContext):
 
     user_id = "default_user"
     try:
-        for participant in ctx.room.remote_participants.values():
-            if participant.identity:
-                user_id = participant.identity
-                break
+        # First, try to get user_id from room metadata (most reliable)
         if ctx.room.metadata:
             import json
-            meta = json.loads(ctx.room.metadata)
-            user_id = meta.get("user_id", user_id)
+            try:
+                meta = json.loads(ctx.room.metadata)
+                user_id = meta.get("user_id", user_id)
+                logger.info(f"Got user_id from metadata: {user_id}")
+            except Exception:
+                pass
+
+        # Fallback: use participant identity
+        if user_id == "default_user":
+            for participant in ctx.room.remote_participants.values():
+                if participant.identity:
+                    user_id = participant.identity
+                    logger.info(f"Got user_id from participant: {user_id}")
+                    break
     except Exception as e:
         logger.warning(f"Could not get user_id: {e}, using default")
 
