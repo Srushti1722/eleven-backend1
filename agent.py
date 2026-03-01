@@ -56,14 +56,14 @@ mem0_config = {
     "llm": {
         "provider": "litellm",
         "config": {
-            "model": "openai/gpt-4o-mini",  # already paying for OpenAI
-            "api_key": os.getenv("OPENAI_API_KEY"),
+            "model": "gemini/gemini-1.5-flash",
+            "api_key": os.getenv("GEMINI_API_KEY"),
         }
     },
     "embedder": {
-        "provider": "huggingface",          # uses fastembed, already installed
+        "provider": "huggingface",
         "config": {
-            "model": "BAAI/bge-small-en-v1.5",  # fast, free, runs locally
+            "model": "BAAI/bge-small-en-v1.5",  # runs locally via fastembed, no API key needed
         }
     },
     "vector_store": {
