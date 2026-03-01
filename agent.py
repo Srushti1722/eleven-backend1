@@ -63,8 +63,8 @@ mem0_config = {
     "llm": {
         "provider": "litellm",
         "config": {
-            "model": "gemini/gemini-2.0-flash",
-            "api_key": os.getenv("GEMINI_API_KEY"),
+            "model": "openai/gpt-4o-mini",
+            "api_key": os.getenv("OPENAI_API_KEY"),
         }
     },
     "embedder": {
