@@ -51,9 +51,11 @@ def validate_livekit_env() -> None:
 
 
 # ─── mem0 setup ───────────────────────────────────────────────────────────────
-# ChromaDB over GCSFuse fails — SQLite does random-seek writes which GCSFuse
-# doesn't support, causing OutOfOrderError and 429s that block prewarm.
-# Solution: Qdrant in-memory (no disk I/O) + persist memories as JSON to GCS.
+# Architecture:
+# - mem0 with Qdrant in-memory: handles LLM-based memory extraction (no disk I/O)
+# - JSON file on GCS: persistence layer (sequential writes = GCSFuse compatible)
+# - Reads go DIRECTLY to JSON, bypassing Qdrant search (avoids dimension mismatch
+#   errors from any stale old embeddings in the bucket)
 
 MEMORY_JSON_PATH = os.getenv("MEMORY_JSON_PATH", "/mnt/chroma_db/memories.json")
 
@@ -75,7 +77,6 @@ mem0_config = {
         "provider": "qdrant",
         "config": {
             "collection_name": "interview_memories",
-            # in-memory mode: no path, no host — pure RAM, no GCSFuse conflicts
         }
     },
     "version": "v1.1"
@@ -88,114 +89,51 @@ def get_memory() -> Memory:
     if _memory is None:
         logger.info("Initialising mem0 with Qdrant in-memory vector store")
         _memory = Memory.from_config(mem0_config)
-        # Restore previously saved memories from GCS-backed JSON file
-        _restore_memories_from_json(_memory)
     return _memory
 
 
-def _restore_memories_from_json(mem: Memory) -> None:
-    """Load persisted memories from JSON into the in-memory Qdrant store."""
+def fetch_all_user_memories(user_id: str) -> str:
+    """Read memories DIRECTLY from JSON file — bypasses Qdrant search entirely.
+    This avoids dimension mismatch errors from stale embeddings and is faster."""
+    logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
     try:
         if not os.path.exists(MEMORY_JSON_PATH):
-            logger.info(f"[mem0] No persisted memory file found at {MEMORY_JSON_PATH}")
-            return
+            logger.info(f"[mem0] No memory file at {MEMORY_JSON_PATH} — new user")
+            return ""
         with open(MEMORY_JSON_PATH, "r") as f:
             data = json.load(f)
-        count = 0
-        for user_id, memories in data.items():
-            for entry in memories:
-                try:
-                    mem.add(
-                        [{"role": "user", "content": entry["memory"]}],
-                        user_id=user_id
-                    )
-                    count += 1
-                except Exception as e:
-                    logger.warning(f"[mem0] Failed to restore entry: {e}")
-        logger.info(f"[mem0] Restored {count} memories from {MEMORY_JSON_PATH}")
+        memories = data.get(user_id, [])
+        if memories:
+            lines = [f"- {m['memory']}" for m in memories if m.get("memory")]
+            logger.info(f"[mem0] Loaded {len(lines)} memories for '{user_id}' from JSON")
+            return "\n".join(lines)
+        else:
+            logger.info(f"[mem0] No memories in JSON for '{user_id}'")
     except Exception as e:
-        logger.error(f"[mem0] Failed to restore memories from JSON: {e}")
+        logger.error(f"[mem0] Failed to read memories from JSON: {e}")
+    return ""
 
 
 def _persist_memories_to_json(user_id: str, mem: Memory) -> None:
-    """Save all in-memory memories to GCS-backed JSON file (sequential write — GCSFuse safe)."""
+    """Save extracted memories to GCS JSON file (sequential write = GCSFuse safe)."""
     try:
-        # Load existing data
         data = {}
         if os.path.exists(MEMORY_JSON_PATH):
             with open(MEMORY_JSON_PATH, "r") as f:
                 data = json.load(f)
 
-        # Fetch latest memories for this user
         result = mem.get_all(user_id=user_id)
-        if isinstance(result, list):
-            entries = result
-        elif isinstance(result, dict):
-            entries = result.get("results", [])
-        else:
-            entries = []
-
+        entries = result.get("results", []) if isinstance(result, dict) else (result or [])
         data[user_id] = [{"memory": e["memory"]} for e in entries if e.get("memory")]
 
-        # Write atomically — single sequential write (GCSFuse compatible)
+        # Atomic sequential write — GCSFuse handles this correctly
         tmp_path = MEMORY_JSON_PATH + ".tmp"
         with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp_path, MEMORY_JSON_PATH)
-        logger.info(f"[mem0] Persisted {len(data[user_id])} memories for '{user_id}' to {MEMORY_JSON_PATH}")
+        logger.info(f"[mem0] ✅ Persisted {len(data[user_id])} memories for '{user_id}'")
     except Exception as e:
-        logger.error(f"[mem0] Failed to persist memories to JSON: {e}")
-
-
-def fetch_all_user_memories(user_id: str) -> str:
-    """Retrieve every stored memory for a user across all past sessions."""
-    mem = get_memory()
-    logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
-
-    try:
-        result = mem.get_all(user_id=user_id)
-        logger.info(f"[mem0] get_all raw result type: {type(result)}, value: {result}")
-
-        if isinstance(result, list):
-            entries = result
-        elif isinstance(result, dict):
-            entries = result.get("results", [])
-        else:
-            entries = []
-
-        if entries:
-            lines = [f"- {m['memory']}" for m in entries if m.get("memory")]
-            logger.info(f"[mem0] Loaded {len(lines)} memories for '{user_id}' via get_all")
-            return "\n".join(lines)
-        else:
-            logger.info(f"[mem0] No memories found for '{user_id}' via get_all")
-    except Exception as e:
-        logger.warning(f"[mem0] get_all failed: {e} — trying search fallback")
-
-    try:
-        queries = ["remember", "user said", "number", "name", "session", "topic", "preference", "phone", "address"]
-        seen, lines = set(), []
-        for q in queries:
-            res = mem.search(query=q, user_id=user_id, limit=20)
-            logger.info(f"[mem0] search('{q}') returned: {type(res)}")
-            if isinstance(res, list):
-                items = res
-            elif isinstance(res, dict):
-                items = res.get("results", [])
-            else:
-                items = []
-            for m in items:
-                key = m.get("id", m.get("memory", ""))
-                if key and key not in seen:
-                    seen.add(key)
-                    lines.append(f"- {m['memory']}")
-        if lines:
-            logger.info(f"[mem0] Loaded {len(lines)} memories for '{user_id}' via search")
-            return "\n".join(lines)
-    except Exception as e:
-        logger.error(f"[mem0] Search fallback failed: {e}")
-
-    return ""
+        logger.error(f"[mem0] Failed to persist to JSON: {e}")
 
 
 def _normalize_role(role) -> str:
