@@ -7,14 +7,6 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# livekit pulls in the bare 'google 1.0.0' stub as a transitive dependency.
-# This empty package poisons the google namespace and breaks google-generativeai.
-# Uninstall it AFTER everything else is installed so pip doesn't re-add it.
-RUN pip uninstall -y google 2>/dev/null || true
-
-# Verify the fix — build fails here if something re-added the stub
-RUN python -c "from google import genai; print('google.genai OK')"
-
 COPY . .
 
 RUN python agent.py download-files
