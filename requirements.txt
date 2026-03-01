@@ -7,3 +7,4 @@ chromadb>=0.6.0
 fastembed
 python-dotenv
 litellm
+openai
