@@ -51,7 +51,11 @@ def validate_livekit_env() -> None:
 
 
 # ─── mem0 setup ───────────────────────────────────────────────────────────────
-CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
+# ChromaDB over GCSFuse fails — SQLite does random-seek writes which GCSFuse
+# doesn't support, causing OutOfOrderError and 429s that block prewarm.
+# Solution: Qdrant in-memory (no disk I/O) + persist memories as JSON to GCS.
+
+MEMORY_JSON_PATH = os.getenv("MEMORY_JSON_PATH", "/mnt/chroma_db/memories.json")
 
 mem0_config = {
     "llm": {
@@ -62,16 +66,16 @@ mem0_config = {
         }
     },
     "embedder": {
-        "provider": "fastembed",          # ← FIXED: was "huggingface", needs "fastembed"
+        "provider": "fastembed",
         "config": {
             "model": "BAAI/bge-small-en-v1.5",
         }
     },
     "vector_store": {
-        "provider": "chroma",
+        "provider": "qdrant",
         "config": {
             "collection_name": "interview_memories",
-            "path": CHROMA_DB_PATH,
+            # in-memory mode: no path, no host — pure RAM, no GCSFuse conflicts
         }
     },
     "version": "v1.1"
@@ -82,9 +86,65 @@ _memory = None
 def get_memory() -> Memory:
     global _memory
     if _memory is None:
-        logger.info(f"Initialising mem0 with chroma at: {CHROMA_DB_PATH}")
+        logger.info("Initialising mem0 with Qdrant in-memory vector store")
         _memory = Memory.from_config(mem0_config)
+        # Restore previously saved memories from GCS-backed JSON file
+        _restore_memories_from_json(_memory)
     return _memory
+
+
+def _restore_memories_from_json(mem: Memory) -> None:
+    """Load persisted memories from JSON into the in-memory Qdrant store."""
+    try:
+        if not os.path.exists(MEMORY_JSON_PATH):
+            logger.info(f"[mem0] No persisted memory file found at {MEMORY_JSON_PATH}")
+            return
+        with open(MEMORY_JSON_PATH, "r") as f:
+            data = json.load(f)
+        count = 0
+        for user_id, memories in data.items():
+            for entry in memories:
+                try:
+                    mem.add(
+                        [{"role": "user", "content": entry["memory"]}],
+                        user_id=user_id
+                    )
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[mem0] Failed to restore entry: {e}")
+        logger.info(f"[mem0] Restored {count} memories from {MEMORY_JSON_PATH}")
+    except Exception as e:
+        logger.error(f"[mem0] Failed to restore memories from JSON: {e}")
+
+
+def _persist_memories_to_json(user_id: str, mem: Memory) -> None:
+    """Save all in-memory memories to GCS-backed JSON file (sequential write — GCSFuse safe)."""
+    try:
+        # Load existing data
+        data = {}
+        if os.path.exists(MEMORY_JSON_PATH):
+            with open(MEMORY_JSON_PATH, "r") as f:
+                data = json.load(f)
+
+        # Fetch latest memories for this user
+        result = mem.get_all(user_id=user_id)
+        if isinstance(result, list):
+            entries = result
+        elif isinstance(result, dict):
+            entries = result.get("results", [])
+        else:
+            entries = []
+
+        data[user_id] = [{"memory": e["memory"]} for e in entries if e.get("memory")]
+
+        # Write atomically — single sequential write (GCSFuse compatible)
+        tmp_path = MEMORY_JSON_PATH + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, MEMORY_JSON_PATH)
+        logger.info(f"[mem0] Persisted {len(data[user_id])} memories for '{user_id}' to {MEMORY_JSON_PATH}")
+    except Exception as e:
+        logger.error(f"[mem0] Failed to persist memories to JSON: {e}")
 
 
 def fetch_all_user_memories(user_id: str) -> str:
@@ -181,15 +241,18 @@ def extract_transcript(session_history) -> list:
 
 
 def save_memory_now(user_id: str, session_history) -> bool:
-    """Save transcript to mem0. Returns True on success."""
+    """Save transcript to mem0 and persist to GCS JSON file."""
     try:
         transcript = extract_transcript(session_history)
         if not transcript:
             logger.warning(f"[mem0] No transcript to save for '{user_id}'")
             return False
         logger.info(f"[mem0] Saving {len(transcript)} messages for user_id='{user_id}'")
-        get_memory().add(transcript, user_id=user_id)
+        mem = get_memory()
+        mem.add(transcript, user_id=user_id)
         logger.info(f"[mem0] ✅ Successfully saved memories for '{user_id}'")
+        # Persist to GCS-backed JSON (sequential write — GCSFuse safe)
+        _persist_memories_to_json(user_id, mem)
         return True
     except Exception as e:
         import traceback
@@ -277,11 +340,10 @@ class DefaultAgent(Agent):
 
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
-    try:
-        get_memory()
-        logger.info("[mem0] Memory initialised during prewarm")
-    except Exception as e:
-        logger.warning(f"[mem0] Prewarm memory init failed: {e}")
+    # NOTE: do NOT call get_memory() here — mem0 init triggers Qdrant + fastembed
+    # model loading which can exceed the prewarm timeout and kill the process.
+    # Memory is initialised lazily on first use inside the session instead.
+    logger.info("[mem0] Prewarm complete (memory init deferred to session start)")
 
 
 server = AgentServer(num_idle_processes=0)
