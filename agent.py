@@ -52,20 +52,18 @@ def validate_livekit_env() -> None:
 
 # ─── mem0 setup ───────────────────────────────────────────────────────────────
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
-
 mem0_config = {
     "llm": {
         "provider": "litellm",
         "config": {
-            "model": "gemini/gemini-1.5-flash",
-            "api_key": os.getenv("GEMINI_API_KEY"),
+            "model": "openai/gpt-4o-mini",  # already paying for OpenAI
+            "api_key": os.getenv("OPENAI_API_KEY"),
         }
     },
     "embedder": {
-        "provider": "gemini",
+        "provider": "huggingface",          # uses fastembed, already installed
         "config": {
-            "model": "models/text-embedding-004",
-            "api_key": os.getenv("GEMINI_API_KEY"),
+            "model": "BAAI/bge-small-en-v1.5",  # fast, free, runs locally
         }
     },
     "vector_store": {
@@ -77,6 +75,7 @@ mem0_config = {
     },
     "version": "v1.1"
 }
+
 
 _memory = None
 
