@@ -52,6 +52,7 @@ def validate_livekit_env() -> None:
 
 # ─── mem0 setup ───────────────────────────────────────────────────────────────
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
+
 mem0_config = {
     "llm": {
         "provider": "litellm",
@@ -61,9 +62,9 @@ mem0_config = {
         }
     },
     "embedder": {
-        "provider": "huggingface",
+        "provider": "fastembed",          # ← FIXED: was "huggingface", needs "fastembed"
         "config": {
-            "model": "BAAI/bge-small-en-v1.5",  # runs locally via fastembed, no API key needed
+            "model": "BAAI/bge-small-en-v1.5",
         }
     },
     "vector_store": {
@@ -75,7 +76,6 @@ mem0_config = {
     },
     "version": "v1.1"
 }
-
 
 _memory = None
 
@@ -92,12 +92,10 @@ def fetch_all_user_memories(user_id: str) -> str:
     mem = get_memory()
     logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
 
-    # FIX: Handle both list and dict return types from get_all
     try:
         result = mem.get_all(user_id=user_id)
         logger.info(f"[mem0] get_all raw result type: {type(result)}, value: {result}")
 
-        # mem0 can return either a list directly OR a dict with 'results' key
         if isinstance(result, list):
             entries = result
         elif isinstance(result, dict):
@@ -114,7 +112,6 @@ def fetch_all_user_memories(user_id: str) -> str:
     except Exception as e:
         logger.warning(f"[mem0] get_all failed: {e} — trying search fallback")
 
-    # Fallback: broad search queries
     try:
         queries = ["remember", "user said", "number", "name", "session", "topic", "preference", "phone", "address"]
         seen, lines = set(), []
@@ -142,20 +139,13 @@ def fetch_all_user_memories(user_id: str) -> str:
 
 
 def _normalize_role(role) -> str:
-    """
-    FIX: Robustly normalize any role object/string to 'user' or 'assistant'.
-    Handles: Role.USER, ChatMessageRole.user, "user", "assistant", etc.
-    """
     raw = str(role).lower()
-    # Strip enum class prefix patterns like "role.", "chatmessagerole.", etc.
     if "." in raw:
         raw = raw.split(".")[-1]
-    # Map known variants
     if raw in ("user", "human"):
         return "user"
     if raw in ("assistant", "ai", "system", "model"):
         return "assistant"
-    # Default fallback: return as-is so logs help debug
     logger.warning(f"[mem0] Unknown role '{role}' -> defaulting to 'user'")
     return "user"
 
@@ -164,7 +154,6 @@ def extract_transcript(session_history) -> list:
     """Extract a clean transcript list from the session's ChatContext."""
     transcript = []
     try:
-        # ChatContext exposes messages as property or method
         if hasattr(session_history, "messages"):
             m = session_history.messages
             messages = m() if callable(m) else m
@@ -182,7 +171,6 @@ def extract_transcript(session_history) -> list:
                 ).strip()
             content = str(content).strip()
             if content:
-                # FIX: Use robust role normalizer
                 role = _normalize_role(msg.role)
                 transcript.append({"role": role, "content": content})
 
@@ -201,10 +189,11 @@ def save_memory_now(user_id: str, session_history) -> bool:
             return False
         logger.info(f"[mem0] Saving {len(transcript)} messages for user_id='{user_id}'")
         get_memory().add(transcript, user_id=user_id)
-        logger.info(f"[mem0] Successfully saved memories for '{user_id}'")
+        logger.info(f"[mem0] ✅ Successfully saved memories for '{user_id}'")
         return True
     except Exception as e:
-        logger.error(f"[mem0] Failed to save memory for '{user_id}': {e}")
+        import traceback
+        logger.error(f"[mem0] ❌ Failed to save memory for '{user_id}':\n{traceback.format_exc()}")
         return False
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -303,8 +292,6 @@ server.setup_fnc = prewarm
 async def entrypoint(ctx: JobContext):
     logger.info("ENTRYPOINT CALLED – agent joining room")
 
-    # FIX: Use a STABLE, CONSISTENT user_id — default to a fixed ID if nothing
-    # else is available, so memories always save/load under the same key.
     user_id = "default_user"
     try:
         if ctx.room.metadata:
@@ -326,10 +313,8 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.warning(f"[mem0] Could not resolve user_id: {e}")
 
-    # IMPORTANT: Log the final user_id so you can verify it's consistent across sessions
     logger.info(f"[mem0] *** FINAL user_id for this session: '{user_id}' ***")
 
-    # Load memories BEFORE creating the agent
     try:
         memories_text = fetch_all_user_memories(user_id)
         if not memories_text:
