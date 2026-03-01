@@ -5,29 +5,15 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# Step 1: Install everything normally
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Step 2: Nuke ALL google-related packages to clear namespace conflicts
-RUN pip uninstall -y \
-    google \
-    google-generativeai \
-    google-ai-generativelanguage \
-    google-cloud-aiplatform \
-    google-api-core \
-    google-auth \
-    googleapis-common-protos \
-    2>/dev/null || true
+# livekit pulls in the bare 'google 1.0.0' stub as a transitive dependency.
+# This empty package poisons the google namespace and breaks google-generativeai.
+# Uninstall it AFTER everything else is installed so pip doesn't re-add it.
+RUN pip uninstall -y google 2>/dev/null || true
 
-# Step 3: Reinstall google packages cleanly in the correct dependency order
-RUN pip install --no-cache-dir \
-    google-auth \
-    google-api-core \
-    googleapis-common-protos \
-    google-generativeai
-
-# Step 4: Verify the import works — build will FAIL here if still broken
-RUN python -c "from google import genai; print('✅ google.genai import OK')"
+# Verify the fix — build fails here if something re-added the stub
+RUN python -c "from google import genai; print('google.genai OK')"
 
 COPY . .
 
