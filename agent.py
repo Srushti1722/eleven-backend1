@@ -20,13 +20,14 @@ from livekit.plugins import (
     silero,
 )
 
-from mem0 import Memory
+from mem0 import MemoryClient
 import sys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent-Casey-10be")
 print("=== AGENT PROCESS STARTED ===", flush=True)
 load_dotenv()
+
 
 def _has_cli_ws_url() -> bool:
     return any(
@@ -50,90 +51,33 @@ def validate_livekit_env() -> None:
         )
 
 
-# ─── mem0 setup ───────────────────────────────────────────────────────────────
-# Architecture:
-# - mem0 with Qdrant in-memory: handles LLM-based memory extraction (no disk I/O)
-# - JSON file on GCS: persistence layer (sequential writes = GCSFuse compatible)
-# - Reads go DIRECTLY to JSON, bypassing Qdrant search (avoids dimension mismatch
-#   errors from any stale old embeddings in the bucket)
-
-MEMORY_JSON_PATH = os.getenv("MEMORY_JSON_PATH", "/mnt/chroma_db/memories.json")
-
-mem0_config = {
-    "llm": {
-        "provider": "litellm",
-        "config": {
-            "model": "gemini/gemini-1.5-flash",
-            "api_key": os.getenv("GEMINI_API_KEY"),
-        }
-    },
-    "embedder": {
-        "provider": "fastembed",
-        "config": {
-            "model": "BAAI/bge-small-en-v1.5",
-        }
-    },
-    "vector_store": {
-        "provider": "qdrant",
-        "config": {
-            "collection_name": "interview_memories",
-        }
-    },
-    "version": "v1.1"
-}
-
+# ─── mem0 Cloud setup ─────────────────────────────────────────────────────────
 _memory = None
 
-def get_memory() -> Memory:
+def get_memory() -> MemoryClient:
     global _memory
     if _memory is None:
-        logger.info("Initialising mem0 with Qdrant in-memory vector store")
-        _memory = Memory.from_config(mem0_config)
+        logger.info("Initialising mem0 Cloud client")
+        _memory = MemoryClient(api_key=os.getenv("MEM0_API_KEY"))
     return _memory
 
 
 def fetch_all_user_memories(user_id: str) -> str:
-    """Read memories DIRECTLY from JSON file — bypasses Qdrant search entirely.
-    This avoids dimension mismatch errors from stale embeddings and is faster."""
+    """Fetch memories from Mem0 Cloud."""
     logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
     try:
-        if not os.path.exists(MEMORY_JSON_PATH):
-            logger.info(f"[mem0] No memory file at {MEMORY_JSON_PATH} — new user")
-            return ""
-        with open(MEMORY_JSON_PATH, "r") as f:
-            data = json.load(f)
-        memories = data.get(user_id, [])
-        if memories:
-            lines = [f"- {m['memory']}" for m in memories if m.get("memory")]
-            logger.info(f"[mem0] Loaded {len(lines)} memories for '{user_id}' from JSON")
+        mem = get_memory()
+        result = mem.get_all(user_id=user_id)
+        entries = result if isinstance(result, list) else result.get("results", [])
+        if entries:
+            lines = [f"- {e['memory']}" for e in entries if e.get("memory")]
+            logger.info(f"[mem0] Loaded {len(lines)} memories for '{user_id}'")
             return "\n".join(lines)
         else:
-            logger.info(f"[mem0] No memories in JSON for '{user_id}'")
+            logger.info(f"[mem0] No memories found for '{user_id}'")
     except Exception as e:
-        logger.error(f"[mem0] Failed to read memories from JSON: {e}")
+        logger.error(f"[mem0] Failed to fetch memories: {e}")
     return ""
-
-
-def _persist_memories_to_json(user_id: str, mem: Memory) -> None:
-    """Save extracted memories to GCS JSON file (sequential write = GCSFuse safe)."""
-    try:
-        data = {}
-        if os.path.exists(MEMORY_JSON_PATH):
-            with open(MEMORY_JSON_PATH, "r") as f:
-                data = json.load(f)
-
-        result = mem.get_all(user_id=user_id)
-        entries = result.get("results", []) if isinstance(result, dict) else (result or [])
-        data[user_id] = [{"memory": e["memory"]} for e in entries if e.get("memory")]
-
-        # Atomic sequential write — GCSFuse handles this correctly
-        tmp_path = MEMORY_JSON_PATH + ".tmp"
-        with open(tmp_path, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, MEMORY_JSON_PATH)
-        logger.info(f"[mem0] ✅ Persisted {len(data[user_id])} memories for '{user_id}'")
-    except Exception as e:
-        logger.error(f"[mem0] Failed to persist to JSON: {e}")
 
 
 def _normalize_role(role) -> str:
@@ -179,7 +123,7 @@ def extract_transcript(session_history) -> list:
 
 
 def save_memory_now(user_id: str, session_history) -> bool:
-    """Save transcript to mem0 and persist to GCS JSON file."""
+    """Save transcript to Mem0 Cloud."""
     try:
         transcript = extract_transcript(session_history)
         if not transcript:
@@ -189,8 +133,6 @@ def save_memory_now(user_id: str, session_history) -> bool:
         mem = get_memory()
         mem.add(transcript, user_id=user_id)
         logger.info(f"[mem0] ✅ Successfully saved memories for '{user_id}'")
-        # Persist to GCS-backed JSON (sequential write — GCSFuse safe)
-        _persist_memories_to_json(user_id, mem)
         return True
     except Exception as e:
         import traceback
@@ -278,9 +220,6 @@ class DefaultAgent(Agent):
 
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
-    # NOTE: do NOT call get_memory() here — mem0 init triggers Qdrant + fastembed
-    # model loading which can exceed the prewarm timeout and kill the process.
-    # Memory is initialised lazily on first use inside the session instead.
     logger.info("[mem0] Prewarm complete (memory init deferred to session start)")
 
 
