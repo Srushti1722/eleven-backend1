@@ -67,7 +67,7 @@ def fetch_all_user_memories(user_id: str) -> str:
     logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
     try:
         mem = get_memory()
-        result = mem.get_all(user_id=user_id)
+        result = mem.get_all(filters={"user_id": user_id})
         entries = result if isinstance(result, list) else result.get("results", [])
         if entries:
             lines = [f"- {e['memory']}" for e in entries if e.get("memory")]
