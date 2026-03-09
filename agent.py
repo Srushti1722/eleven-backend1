@@ -158,7 +158,7 @@ os.makedirs(_SUMMARY_REQUEST_DIR, exist_ok=True)
 os.makedirs(_SUMMARY_RESULT_DIR, exist_ok=True)
 
 
-def _write_registry_file(room_name: str, pid: int) -> None:
+def _write_registry_file(room_name: str, pid: int, user_id: str = "") -> None:
     with _registry_file_lock:
         try:
             try:
@@ -167,6 +167,8 @@ def _write_registry_file(room_name: str, pid: int) -> None:
             except Exception:
                 data = {}
             data[room_name] = pid
+            if user_id:
+                data[room_name + "_user_id"] = user_id
             with open(_REGISTRY_FILE, "w") as f:
                 json.dump(data, f)
         except Exception as e:
@@ -197,7 +199,7 @@ def _read_registry_file() -> dict:
 def _register_agent(room_name: str, agent: "DefaultAgent") -> None:
     with _sessions_lock:
         _active_sessions[room_name] = agent
-    _write_registry_file(room_name, os.getpid())
+    _write_registry_file(room_name, os.getpid(), agent.user_id)
     logger.info(f"[registry] Registered agent for room '{room_name}' (pid={os.getpid()})")
 
 
@@ -250,12 +252,13 @@ If the user shares new information, acknowledge it and confirm you will remember
 - Protect user privacy."""
 
 
-SUMMARY_SYSTEM_PROMPT = """You are a helpful assistant that summarises voice-call transcripts.
-Given the conversation below, produce a concise, human-readable summary.
+SUMMARY_SYSTEM_PROMPT = """You are a helpful assistant that summarises a user's conversation history with a voice AI assistant.
+You are given a list of memory facts extracted from all past and current sessions.
+Produce a concise, human-readable summary of what was discussed across all sessions.
 
 Format your response as JSON with exactly these keys:
 {
-  "overview": "<2-3 sentence high-level summary>",
+  "overview": "<2-3 sentence high-level summary across all sessions>",
   "key_points": ["<point 1>", "<point 2>", ...],
   "action_items": ["<item 1>", ...],
   "topics_discussed": ["<topic 1>", ...]
@@ -264,39 +267,46 @@ Format your response as JSON with exactly these keys:
 Only output valid JSON. No markdown fences, no extra text."""
 
 
-async def _generate_summary_for_agent(agent: "DefaultAgent") -> dict:
-    """Ask the LLM to summarise the current session transcript."""
-    transcript = extract_transcript(agent.session.history)
-    if not transcript:
+def _generate_summary_from_memories(user_id: str) -> dict:
+    """Generate a summary from mem0 memories — works across all processes and sessions."""
+    import httpx
+
+    memories_text = fetch_all_user_memories(user_id)
+    if not memories_text:
         return {
-            "overview": "No conversation recorded yet.",
+            "overview": "No conversation history found yet. Start talking to Casey and your memories will appear here.",
             "key_points": [],
             "action_items": [],
             "topics_discussed": [],
         }
 
-    convo_text = "\n".join(
-        f"{msg['role'].upper()}: {msg['content']}" for msg in transcript
-    )
-
-    from openai import AsyncOpenAI  # livekit-agents exposes openai under the hood
-
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    response = await client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
+    api_key = os.getenv("OPENAI_API_KEY")
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
             {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": convo_text},
+            {"role": "user", "content": f"Memory facts from all sessions:\n{memories_text}"},
         ],
-        temperature=0.3,
-        max_tokens=600,
-    )
+        "temperature": 0.3,
+        "max_tokens": 600,
+    }
 
-    raw = response.choices[0].message.content.strip()
+    resp = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=25,
+    )
+    resp.raise_for_status()
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+
+    # Strip markdown fences if present
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Fallback: return raw text wrapped in the expected shape
         return {
             "overview": raw,
             "key_points": [],
@@ -512,84 +522,41 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/summary":
             params = parse_qs(parsed.query)
             room_name = (params.get("room") or [""])[0]
+            # Allow passing user_id directly as a fallback
+            user_id = (params.get("user_id") or [""])[0]
 
-            if not room_name:
+            if not room_name and not user_id:
                 self._send_json(400, {"error": "Missing 'room' query parameter"})
                 return
 
-            # Poll for up to 12 seconds — handles the case where the HTTP request
-            # arrives before the agent process has finished registering (mem0 fetch).
-            agent = None
-            for wait_attempt in range(12):
+            # Resolve user_id from active sessions if not provided directly
+            if not user_id:
+                # Check in-process registry first
                 agent = _get_agent(room_name)
-
-                # Fallback: single active session
                 if agent is None:
                     with _sessions_lock:
                         sessions = list(_active_sessions.values())
                     if len(sessions) == 1:
                         agent = sessions[0]
-                        logger.info(f"[summary] Using only active session as fallback")
+                # Check file registry for cross-process sessions
+                if agent is None:
+                    file_reg = _read_registry_file()
+                    uid_from_file = file_reg.get(room_name + "_user_id", "")
+                    if uid_from_file:
+                        user_id = uid_from_file
 
                 if agent is not None:
-                    break
+                    user_id = agent.user_id
 
-                # Not found in this process — check if another process has it
-                file_reg = _read_registry_file()
-                if room_name in file_reg:
-                    other_pid = file_reg[room_name]
-                    if other_pid != os.getpid():
-                        logger.info(f"[summary] Room '{room_name}' in pid={other_pid}, signalling via file")
-                        req_file = os.path.join(_SUMMARY_REQUEST_DIR, f"{room_name}.req")
-                        result_file = os.path.join(_SUMMARY_RESULT_DIR, f"{room_name}.json")
-                        # Clear any stale result
-                        try:
-                            os.remove(result_file)
-                        except FileNotFoundError:
-                            pass
-                        # Write request file to signal the other process
-                        open(req_file, "w").close()
-                        # Wait up to 15s for the result file to appear
-                        for _ in range(30):
-                            time.sleep(0.5)
-                            if os.path.exists(result_file):
-                                try:
-                                    with open(result_file, "r") as f:
-                                        result = json.load(f)
-                                    os.remove(result_file)
-                                    self._send_json(200, result)
-                                    return
-                                except Exception as e:
-                                    logger.error(f"[summary] Failed to read result file: {e}")
-                        self._send_json(504, {"error": "Summary generation timed out (cross-process)"})
-                        return
+            if not user_id:
+                user_id = "default_user"
 
-                logger.info(f"[summary] Waiting for agent to register (attempt {wait_attempt+1}/12)...")
-                time.sleep(1)
-
-            if agent is None:
-                file_reg = _read_registry_file()
-                self._send_json(404, {
-                    "error": f"No active session for room '{room_name}'",
-                    "hint": f"In-process rooms: {list(_active_sessions.keys())}. File registry: {file_reg}",
-                })
-                return
-
-            loop = _agent_loop
-            if loop is None or not loop.is_running():
-                self._send_json(503, {"error": "Agent event loop not available"})
-                return
-
+            logger.info(f"[summary] Generating mem0-based summary for user_id='{user_id}'")
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    _generate_summary_for_agent(agent), loop
-                )
-                summary = future.result(timeout=30)
-                self._send_json(200, summary)
-            except TimeoutError:
-                self._send_json(504, {"error": "Summary generation timed out"})
+                result = _generate_summary_from_memories(user_id)
+                self._send_json(200, result)
             except Exception as exc:
-                logger.error(f"[summary] Error generating summary: {exc}")
+                logger.error(f"[summary] Error: {exc}")
                 self._send_json(500, {"error": str(exc)})
             return
 
