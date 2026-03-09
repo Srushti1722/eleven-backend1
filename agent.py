@@ -426,6 +426,13 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"OK")
             return
 
+        if parsed.path == "/rooms":
+            # Debug: see exactly what room names the agent has registered
+            with _sessions_lock:
+                rooms = list(_active_sessions.keys())
+            self._send_json(200, {"active_rooms": rooms})
+            return
+
         if parsed.path == "/summary":
             params = parse_qs(parsed.query)
             room_name = (params.get("room") or [""])[0]
@@ -435,8 +442,31 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             agent = _get_agent(room_name)
+
+            # Fallback 1: match by user_id (frontend room.name may != agent ctx.room.name)
             if agent is None:
-                self._send_json(404, {"error": f"No active session for room '{room_name}'"})
+                with _sessions_lock:
+                    for reg_agent in _active_sessions.values():
+                        if reg_agent.user_id == room_name:
+                            agent = reg_agent
+                            logger.info(f"[summary] Matched by user_id fallback: '{room_name}'")
+                            break
+
+            # Fallback 2: if exactly one session active, just use it
+            if agent is None:
+                with _sessions_lock:
+                    sessions = list(_active_sessions.values())
+                if len(sessions) == 1:
+                    agent = sessions[0]
+                    logger.info(f"[summary] Single active session used as fallback for '{room_name}'")
+
+            if agent is None:
+                with _sessions_lock:
+                    active = list(_active_sessions.keys())
+                self._send_json(404, {
+                    "error": f"No active session for room '{room_name}'",
+                    "hint": f"Registered rooms: {active}. Visit /rooms to debug.",
+                })
                 return
 
             loop = _agent_loop
