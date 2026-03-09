@@ -288,11 +288,29 @@ def _generate_summary_from_memories(user_id: str) -> dict:
         "gemini-1.5-flash",
         "gemini-1.5-pro",
         "gemini-1.0-pro",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-pro-001",
+        "gemini-1.5-pro-002",
     ]
+
+    # Log available models for debugging
+    try:
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        list_req = urllib.request.Request(list_url)
+        with urllib.request.urlopen(list_req, timeout=10) as r:
+            available = json.loads(r.read())
+            names = [m["name"] for m in available.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+            logger.info(f"[summary] Available Gemini models: {names}")
+            # Use first available model
+            if names:
+                models_to_try = [n.replace("models/", "") for n in names[:3]]
+    except Exception as e:
+        logger.warning(f"[summary] Could not list models: {e}")
 
     last_error = None
     for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 600}
