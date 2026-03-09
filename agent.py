@@ -254,17 +254,18 @@ If the user shares new information, acknowledge it and confirm you will remember
 
 SUMMARY_SYSTEM_PROMPT = """You are a helpful assistant that summarises a user's conversation history with a voice AI assistant.
 You are given a list of memory facts extracted from all past and current sessions.
-Produce a concise, human-readable summary of what was discussed across all sessions.
+Produce a complete, human-readable summary of everything discussed across all sessions.
 
-Format your response as JSON with exactly these keys:
+You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no extra text before or after.
+The JSON must have exactly these keys:
 {
-  "overview": "<2-3 sentence high-level summary across all sessions>",
-  "key_points": ["<point 1>", "<point 2>", ...],
-  "action_items": ["<item 1>", ...],
-  "topics_discussed": ["<topic 1>", ...]
+  "overview": "A thorough 3-5 sentence summary covering all topics the user discussed",
+  "key_points": ["Complete point 1", "Complete point 2", "Complete point 3"],
+  "action_items": ["Action item 1 if any"],
+  "topics_discussed": ["Topic 1", "Topic 2"]
 }
 
-Only output valid JSON. No markdown fences, no extra text."""
+Do not truncate any field. Write complete sentences. Output raw JSON only."""
 
 
 def _generate_summary_from_memories(user_id: str) -> dict:
@@ -313,7 +314,7 @@ def _generate_summary_from_memories(user_id: str) -> dict:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 600}
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}
         }).encode()
 
         req = urllib.request.Request(
