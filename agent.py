@@ -449,6 +449,29 @@ async def entrypoint(ctx: JobContext):
                     user_id = participant.identity
                     logger.info(f"[mem0] user_id from participant identity: '{user_id}'")
                     break
+
+        # Fallback: extract user identity from room name pattern
+        # e.g. "room_srushtidt03_gmail_com_1773069979472" -> "srushtidt03@gmail.com"
+        if user_id == "default_user" and ctx.room.name:
+            import re
+            # Strip leading "room_" / "voice_assistant_room_" and trailing timestamp
+            name = ctx.room.name
+            name = re.sub(r'^(voice_assistant_room_|room_)', '', name)
+            name = re.sub(r'_\d{13}$', '', name)  # remove trailing unix ms timestamp
+            if name:
+                # Restore email format: srushtidt03_gmail_com -> srushtidt03@gmail.com
+                # Pattern: everything before last two segments is local part, last two are domain
+                parts = name.split('_')
+                if len(parts) >= 3:
+                    # find the tld (com/org/net/in etc) at the end
+                    tld = parts[-1]
+                    domain = parts[-2]
+                    local = '_'.join(parts[:-2])
+                    candidate = f"{local}@{domain}.{tld}"
+                else:
+                    candidate = name
+                user_id = candidate
+                logger.info(f"[mem0] user_id extracted from room name: '{user_id}'"  )
     except Exception as e:
         logger.warning(f"[mem0] Could not resolve user_id: {e}")
 
