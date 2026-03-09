@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import time
 import json
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -140,21 +141,64 @@ def save_memory_now(user_id: str, session_history) -> bool:
         return False
 
 
-# ─── Session registry (maps room_name → active AgentSession) ──────────────────
-# Used by the HTTP summary endpoint to reach into the live session.
+# ─── Session registry ────────────────────────────────────────────────────────
+# Cloud Run may spawn multiple processes per instance. The HTTP server
+# and the agent session may live in DIFFERENT processes (different memory).
+# We use a shared /tmp file as a cross-process registry, plus an in-process
+# dict as primary storage. The /summary handler checks both.
 _active_sessions: dict[str, "DefaultAgent"] = {}
 _sessions_lock = threading.Lock()
+_REGISTRY_FILE = "/tmp/agent_registry.json"
+_registry_file_lock = threading.Lock()
+
+
+def _write_registry_file(room_name: str, pid: int) -> None:
+    with _registry_file_lock:
+        try:
+            try:
+                with open(_REGISTRY_FILE, "r") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+            data[room_name] = pid
+            with open(_REGISTRY_FILE, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.warning(f"[registry] Failed to write registry file: {e}")
+
+
+def _remove_registry_file(room_name: str) -> None:
+    with _registry_file_lock:
+        try:
+            with open(_REGISTRY_FILE, "r") as f:
+                data = json.load(f)
+            data.pop(room_name, None)
+            with open(_REGISTRY_FILE, "w") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+
+def _read_registry_file() -> dict:
+    with _registry_file_lock:
+        try:
+            with open(_REGISTRY_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
 
 
 def _register_agent(room_name: str, agent: "DefaultAgent") -> None:
     with _sessions_lock:
         _active_sessions[room_name] = agent
-    logger.info(f"[registry] Registered agent for room '{room_name}'")
+    _write_registry_file(room_name, os.getpid())
+    logger.info(f"[registry] Registered agent for room '{room_name}' (pid={os.getpid()})")
 
 
 def _unregister_agent(room_name: str) -> None:
     with _sessions_lock:
         _active_sessions.pop(room_name, None)
+    _remove_registry_file(room_name)
     logger.info(f"[registry] Unregistered agent for room '{room_name}'")
 
 
@@ -427,10 +471,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/rooms":
-            # Debug: see exactly what room names the agent has registered
-            with _sessions_lock:
-                rooms = list(_active_sessions.keys())
-            self._send_json(200, {"active_rooms": rooms})
+            # Debug: see registered rooms across all processes
+            in_proc = list(_active_sessions.keys())
+            file_reg = _read_registry_file()
+            self._send_json(200, {
+                "in_process": in_proc,
+                "file_registry": file_reg,
+                "pid": os.getpid(),
+            })
             return
 
         if parsed.path == "/summary":
@@ -441,31 +489,44 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "Missing 'room' query parameter"})
                 return
 
-            agent = _get_agent(room_name)
+            # Poll for up to 12 seconds — handles the case where the HTTP request
+            # arrives before the agent process has finished registering (mem0 fetch).
+            agent = None
+            for wait_attempt in range(12):
+                agent = _get_agent(room_name)
 
-            # Fallback 1: match by user_id (frontend room.name may != agent ctx.room.name)
-            if agent is None:
-                with _sessions_lock:
-                    for reg_agent in _active_sessions.values():
-                        if reg_agent.user_id == room_name:
-                            agent = reg_agent
-                            logger.info(f"[summary] Matched by user_id fallback: '{room_name}'")
-                            break
+                # Fallback: single active session
+                if agent is None:
+                    with _sessions_lock:
+                        sessions = list(_active_sessions.values())
+                    if len(sessions) == 1:
+                        agent = sessions[0]
+                        logger.info(f"[summary] Using only active session as fallback")
 
-            # Fallback 2: if exactly one session active, just use it
-            if agent is None:
-                with _sessions_lock:
-                    sessions = list(_active_sessions.values())
-                if len(sessions) == 1:
-                    agent = sessions[0]
-                    logger.info(f"[summary] Single active session used as fallback for '{room_name}'")
+                if agent is not None:
+                    break
+
+                # Not found in this process — check if another process has it
+                file_reg = _read_registry_file()
+                if room_name in file_reg:
+                    other_pid = file_reg[room_name]
+                    if other_pid != os.getpid():
+                        # The session lives in a different process — we can't reach it.
+                        # On Cloud Run single-instance this shouldn't happen after warm-up.
+                        logger.warning(f"[summary] Room '{room_name}' registered in pid={other_pid}, we are pid={os.getpid()}")
+                        self._send_json(503, {
+                            "error": "Session is on a different worker process. Please refresh the page and try again.",
+                        })
+                        return
+
+                logger.info(f"[summary] Waiting for agent to register (attempt {wait_attempt+1}/12)...")
+                time.sleep(1)
 
             if agent is None:
-                with _sessions_lock:
-                    active = list(_active_sessions.keys())
+                file_reg = _read_registry_file()
                 self._send_json(404, {
                     "error": f"No active session for room '{room_name}'",
-                    "hint": f"Registered rooms: {active}. Visit /rooms to debug.",
+                    "hint": f"In-process rooms: {list(_active_sessions.keys())}. File registry: {file_reg}",
                 })
                 return
 
