@@ -268,8 +268,8 @@ Only output valid JSON. No markdown fences, no extra text."""
 
 
 def _generate_summary_from_memories(user_id: str) -> dict:
-    """Generate a summary from mem0 memories — works across all processes and sessions."""
-    import httpx
+    """Generate a summary from mem0 memories using Gemini."""
+    import google.generativeai as genai
 
     memories_text = fetch_all_user_memories(user_id)
     if not memories_text:
@@ -280,25 +280,12 @@ def _generate_summary_from_memories(user_id: str) -> dict:
             "topics_discussed": [],
         }
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Memory facts from all sessions:\n{memories_text}"},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 600,
-    }
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
-    resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=25,
-    )
-    resp.raise_for_status()
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    prompt = f"{SUMMARY_SYSTEM_PROMPT}\n\nMemory facts from all sessions:\n{memories_text}"
+    response = model.generate_content(prompt)
+    raw = response.text.strip()
 
     # Strip markdown fences if present
     if raw.startswith("```"):
