@@ -268,8 +268,8 @@ Only output valid JSON. No markdown fences, no extra text."""
 
 
 def _generate_summary_from_memories(user_id: str) -> dict:
-    """Generate a summary from mem0 memories using Gemini."""
-    import google.generativeai as genai
+    """Generate a summary from mem0 memories using Gemini REST API directly."""
+    import urllib.request
 
     memories_text = fetch_all_user_memories(user_id)
     if not memories_text:
@@ -280,26 +280,53 @@ def _generate_summary_from_memories(user_id: str) -> dict:
             "topics_discussed": [],
         }
 
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
+    api_key = os.getenv("GEMINI_API_KEY", "")
     prompt = f"{SUMMARY_SYSTEM_PROMPT}\n\nMemory facts from all sessions:\n{memories_text}"
-    response = model.generate_content(prompt)
-    raw = response.text.strip()
 
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    # Try models in order until one works
+    models_to_try = [
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro-latest",
+        "gemini-pro",
+    ]
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {
-            "overview": raw,
-            "key_points": [],
-            "action_items": [],
-            "topics_discussed": [],
-        }
+    last_error = None
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 600}
+        }).encode()
+
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                result = json.loads(resp.read())
+                raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                logger.info(f"[summary] Used model: {model_name}")
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    return {"overview": raw, "key_points": [], "action_items": [], "topics_discussed": []}
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            last_error = f"{model_name}: {e.code} {body[:200]}"
+            logger.warning(f"[summary] Model {model_name} failed: {e.code}")
+            continue
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[summary] Model {model_name} error: {e}")
+            continue
+
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
 
 class DefaultAgent(Agent):
