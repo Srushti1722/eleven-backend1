@@ -149,7 +149,13 @@ def save_memory_now(user_id: str, session_history) -> bool:
 _active_sessions: dict[str, "DefaultAgent"] = {}
 _sessions_lock = threading.Lock()
 _REGISTRY_FILE = "/tmp/agent_registry.json"
+_SUMMARY_REQUEST_DIR = "/tmp/summary_requests"
+_SUMMARY_RESULT_DIR = "/tmp/summary_results"
 _registry_file_lock = threading.Lock()
+
+# Ensure shared dirs exist
+os.makedirs(_SUMMARY_REQUEST_DIR, exist_ok=True)
+os.makedirs(_SUMMARY_RESULT_DIR, exist_ok=True)
 
 
 def _write_registry_file(room_name: str, pid: int) -> None:
@@ -309,6 +315,7 @@ class DefaultAgent(Agent):
 
     async def on_enter(self):
         self._save_task = asyncio.create_task(self._periodic_save())
+        self._summary_task = asyncio.create_task(self._watch_summary_requests())
 
         await self.session.generate_reply(
             instructions=(
@@ -320,6 +327,26 @@ class DefaultAgent(Agent):
             allow_interruptions=True,
         )
 
+    async def _watch_summary_requests(self):
+        """Poll for summary request files written by the HTTP handler process."""
+        req_file = os.path.join(_SUMMARY_REQUEST_DIR, f"{self._room_name}.req")
+        result_file = os.path.join(_SUMMARY_RESULT_DIR, f"{self._room_name}.json")
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                if os.path.exists(req_file):
+                    try:
+                        os.remove(req_file)
+                        logger.info(f"[summary] Generating summary for '{self._room_name}' (cross-process request)")
+                        result = await _generate_summary_for_agent(self)
+                        with open(result_file, "w") as f:
+                            json.dump(result, f)
+                        logger.info(f"[summary] Written result to {result_file}")
+                    except Exception as e:
+                        logger.error(f"[summary] Error handling cross-process request: {e}")
+        except asyncio.CancelledError:
+            pass
+
     async def _periodic_save(self):
         try:
             while True:
@@ -330,12 +357,13 @@ class DefaultAgent(Agent):
             pass
 
     async def on_exit(self):
-        if self._save_task and not self._save_task.done():
-            self._save_task.cancel()
-            try:
-                await self._save_task
-            except asyncio.CancelledError:
-                pass
+        for task in [self._save_task, getattr(self, '_summary_task', None)]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         logger.info(f"[mem0] Final save on session exit for '{self.user_id}'")
         save_memory_now(self.user_id, self.session.history)
@@ -511,12 +539,29 @@ class Handler(BaseHTTPRequestHandler):
                 if room_name in file_reg:
                     other_pid = file_reg[room_name]
                     if other_pid != os.getpid():
-                        # The session lives in a different process — we can't reach it.
-                        # On Cloud Run single-instance this shouldn't happen after warm-up.
-                        logger.warning(f"[summary] Room '{room_name}' registered in pid={other_pid}, we are pid={os.getpid()}")
-                        self._send_json(503, {
-                            "error": "Session is on a different worker process. Please refresh the page and try again.",
-                        })
+                        logger.info(f"[summary] Room '{room_name}' in pid={other_pid}, signalling via file")
+                        req_file = os.path.join(_SUMMARY_REQUEST_DIR, f"{room_name}.req")
+                        result_file = os.path.join(_SUMMARY_RESULT_DIR, f"{room_name}.json")
+                        # Clear any stale result
+                        try:
+                            os.remove(result_file)
+                        except FileNotFoundError:
+                            pass
+                        # Write request file to signal the other process
+                        open(req_file, "w").close()
+                        # Wait up to 15s for the result file to appear
+                        for _ in range(30):
+                            time.sleep(0.5)
+                            if os.path.exists(result_file):
+                                try:
+                                    with open(result_file, "r") as f:
+                                        result = json.load(f)
+                                    os.remove(result_file)
+                                    self._send_json(200, result)
+                                    return
+                                except Exception as e:
+                                    logger.error(f"[summary] Failed to read result file: {e}")
+                        self._send_json(504, {"error": "Summary generation timed out (cross-process)"})
                         return
 
                 logger.info(f"[summary] Waiting for agent to register (attempt {wait_attempt+1}/12)...")
