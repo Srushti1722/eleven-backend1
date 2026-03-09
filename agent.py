@@ -138,6 +138,29 @@ def save_memory_now(user_id: str, session_history) -> bool:
         import traceback
         logger.error(f"[mem0] ❌ Failed to save memory for '{user_id}':\n{traceback.format_exc()}")
         return False
+
+
+# ─── Session registry (maps room_name → active AgentSession) ──────────────────
+# Used by the HTTP summary endpoint to reach into the live session.
+_active_sessions: dict[str, "DefaultAgent"] = {}
+_sessions_lock = threading.Lock()
+
+
+def _register_agent(room_name: str, agent: "DefaultAgent") -> None:
+    with _sessions_lock:
+        _active_sessions[room_name] = agent
+    logger.info(f"[registry] Registered agent for room '{room_name}'")
+
+
+def _unregister_agent(room_name: str) -> None:
+    with _sessions_lock:
+        _active_sessions.pop(room_name, None)
+    logger.info(f"[registry] Unregistered agent for room '{room_name}'")
+
+
+def _get_agent(room_name: str) -> "DefaultAgent | None":
+    with _sessions_lock:
+        return _active_sessions.get(room_name)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -177,11 +200,67 @@ If the user shares new information, acknowledge it and confirm you will remember
 - Protect user privacy."""
 
 
+SUMMARY_SYSTEM_PROMPT = """You are a helpful assistant that summarises voice-call transcripts.
+Given the conversation below, produce a concise, human-readable summary.
+
+Format your response as JSON with exactly these keys:
+{
+  "overview": "<2-3 sentence high-level summary>",
+  "key_points": ["<point 1>", "<point 2>", ...],
+  "action_items": ["<item 1>", ...],
+  "topics_discussed": ["<topic 1>", ...]
+}
+
+Only output valid JSON. No markdown fences, no extra text."""
+
+
+async def _generate_summary_for_agent(agent: "DefaultAgent") -> dict:
+    """Ask the LLM to summarise the current session transcript."""
+    transcript = extract_transcript(agent.session.history)
+    if not transcript:
+        return {
+            "overview": "No conversation recorded yet.",
+            "key_points": [],
+            "action_items": [],
+            "topics_discussed": [],
+        }
+
+    convo_text = "\n".join(
+        f"{msg['role'].upper()}: {msg['content']}" for msg in transcript
+    )
+
+    from openai import AsyncOpenAI  # livekit-agents exposes openai under the hood
+
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = await client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": convo_text},
+        ],
+        temperature=0.3,
+        max_tokens=600,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: return raw text wrapped in the expected shape
+        return {
+            "overview": raw,
+            "key_points": [],
+            "action_items": [],
+            "topics_discussed": [],
+        }
+
+
 class DefaultAgent(Agent):
     def __init__(self, user_id: str, instructions: str) -> None:
         self.user_id = user_id
         self._memory_save_interval = int(os.getenv("MEMORY_SAVE_INTERVAL", "60"))
         self._save_task: asyncio.Task | None = None
+        self._room_name: str = ""
         super().__init__(instructions=instructions)
 
     async def on_enter(self):
@@ -216,6 +295,7 @@ class DefaultAgent(Agent):
 
         logger.info(f"[mem0] Final save on session exit for '{self.user_id}'")
         save_memory_now(self.user_id, self.session.history)
+        _unregister_agent(self._room_name)
 
 
 def prewarm(proc):
@@ -227,8 +307,15 @@ server = AgentServer(num_idle_processes=0)
 server.setup_fnc = prewarm
 
 
+# ─── Async event loop shared with the HTTP handler ────────────────────────────
+_agent_loop: asyncio.AbstractEventLoop | None = None
+
+
 @server.rtc_session(agent_name="Casey-10be")
 async def entrypoint(ctx: JobContext):
+    global _agent_loop
+    _agent_loop = asyncio.get_running_loop()
+
     logger.info("ENTRYPOINT CALLED – agent joining room")
 
     user_id = "default_user"
@@ -267,6 +354,10 @@ async def entrypoint(ctx: JobContext):
 
     instructions = build_instructions(memories_text)
 
+    agent = DefaultAgent(user_id=user_id, instructions=instructions)
+    agent._room_name = ctx.room.name
+    _register_agent(ctx.room.name, agent)
+
     session = AgentSession(
         stt=inference.STT(model="assemblyai/universal-streaming", language="en"),
         llm=inference.LLM(model="openai/gpt-4.1-mini"),
@@ -280,7 +371,7 @@ async def entrypoint(ctx: JobContext):
     )
 
     await session.start(
-        agent=DefaultAgent(user_id=user_id, instructions=instructions),
+        agent=agent,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
@@ -292,20 +383,92 @@ async def entrypoint(ctx: JobContext):
     )
 
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
+# ─── HTTP server with /summary endpoint ───────────────────────────────────────
+class Handler(BaseHTTPRequestHandler):
+    """
+    Health check  : GET /
+    Session summary: GET /summary?room=<room_name>
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
+    The summary endpoint returns JSON:
+    {
+      "overview": "...",
+      "key_points": [...],
+      "action_items": [...],
+      "topics_discussed": [...]
+    }
+    """
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        # Allow the frontend (any origin) to call this endpoint
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        from urllib.parse import urlparse, parse_qs
+
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
+            return
 
-        def log_message(self, *args):
-            pass
+        if parsed.path == "/summary":
+            params = parse_qs(parsed.query)
+            room_name = (params.get("room") or [""])[0]
+
+            if not room_name:
+                self._send_json(400, {"error": "Missing 'room' query parameter"})
+                return
+
+            agent = _get_agent(room_name)
+            if agent is None:
+                self._send_json(404, {"error": f"No active session for room '{room_name}'"})
+                return
+
+            loop = _agent_loop
+            if loop is None or not loop.is_running():
+                self._send_json(503, {"error": "Agent event loop not available"})
+                return
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _generate_summary_for_agent(agent), loop
+                )
+                summary = future.result(timeout=30)
+                self._send_json(200, summary)
+            except TimeoutError:
+                self._send_json(504, {"error": "Summary generation timed out"})
+            except Exception as exc:
+                logger.error(f"[summary] Error generating summary: {exc}")
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass  # suppress noisy access logs
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8080"))
 
     httpd = HTTPServer(("0.0.0.0", port), Handler)
-    logger.info(f"Health server running on port {port}")
+    logger.info(f"Health + summary server running on port {port}")
 
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
