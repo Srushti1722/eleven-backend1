@@ -200,6 +200,32 @@ def _read_registry_file() -> dict:
             return {}
 
 
+def _user_id_from_room_name(room_name: str) -> str | None:
+    """
+    Derive user_id purely from the room name pattern — used when the session
+    has already ended and the registry no longer holds the mapping.
+
+    Supported patterns:
+      room_<local>_<domain>_<tld>_<timestamp>
+      voice_assistant_room_<local>_<domain>_<tld>_<timestamp>
+
+    e.g. "room_alice_gmail_com_1773069979472" → "alice@gmail.com"
+    """
+    import re
+    name = room_name
+    name = re.sub(r"^(voice_assistant_room_|room_)", "", name)
+    name = re.sub(r"_\d{10,}$", "", name)   # strip trailing unix timestamp
+    if not name:
+        return None
+    parts = name.split("_")
+    if len(parts) >= 3:
+        tld    = parts[-1]
+        domain = parts[-2]
+        local  = "_".join(parts[:-2])
+        return f"{local}@{domain}.{tld}"
+    return name if name else None
+
+
 def _register_agent(room_name: str, agent: "DefaultAgent") -> None:
     """Register an active agent. user_id must already be set on the agent."""
     if not agent.user_id:
@@ -308,7 +334,11 @@ def _generate_summary_from_memories(user_id: str) -> dict:
     memories_text = fetch_all_user_memories(user_id)
     if not memories_text:
         return {
-            "overview": "No conversation history found yet. Start talking to Casey and your memories will appear here.",
+            "overview": (
+                f"No conversation history found for this user yet. "
+                "Once you have a session with Casey, memories will be saved and "
+                "a full summary of all past conversations will appear here."
+            ),
             "key_points": [],
             "action_items": [],
             "topics_discussed": [],
@@ -531,6 +561,18 @@ def _resolve_user_id_from_ctx(ctx: JobContext) -> str:
 async def entrypoint(ctx: JobContext):
     logger.info("ENTRYPOINT CALLED – agent joining room")
 
+    # Connect to LiveKit FIRST so room metadata and participants are available
+    await ctx.connect()
+    logger.info(f"[livekit] Connected to room '{ctx.room.name}'")
+
+    # Wait up to 10 s for at least one remote participant to join
+    deadline = asyncio.get_event_loop().time() + 10
+    while not ctx.room.remote_participants and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.2)
+
+    if not ctx.room.remote_participants:
+        logger.warning("[livekit] No remote participants within 10 s — proceeding anyway")
+
     # Strictly resolve user identity — fail loudly rather than mix users
     try:
         user_id = _resolve_user_id_from_ctx(ctx)
@@ -650,9 +692,22 @@ class Handler(BaseHTTPRequestHandler):
                 # Caller supplied user_id directly — trust it (frontend is responsible)
                 user_id = explicit_user_id
                 logger.info(f"[summary] user_id supplied directly: '{user_id}'")
+
             elif room_name:
-                # Strict lookup — only this room, no fallbacks
+                # 1. Try active-session registry (in-process + file)
                 user_id = _resolve_user_id_for_room(room_name)
+
+                # 2. Session may have already ended — derive user_id from room name pattern.
+                #    This is safe because the room name was constructed from the user's
+                #    identity in the first place (see _resolve_user_id_from_ctx).
+                if not user_id:
+                    user_id = _user_id_from_room_name(room_name)
+                    if user_id:
+                        logger.info(
+                            f"[summary] Session ended — derived user_id='{user_id}' "
+                            f"from room name '{room_name}'"
+                        )
+
             else:
                 self._send_json(400, {
                     "error": "Provide either 'room' or 'user_id' as a query parameter."
@@ -660,13 +715,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if not user_id:
-                # Room is unknown / session not active in any process
-                logger.warning(f"[summary] Unknown room='{room_name}' — refusing to serve summary")
+                logger.warning(f"[summary] Cannot identify user for room='{room_name}'")
                 self._send_json(404, {
                     "error": (
-                        f"No active session found for room '{room_name}'. "
-                        "The session may have ended or belongs to a different process. "
-                        "Pass ?user_id=<email> directly if you know the user identity."
+                        f"Cannot identify the user for room '{room_name}'. "
+                        "Pass ?user_id=<email> directly."
                     )
                 })
                 return
