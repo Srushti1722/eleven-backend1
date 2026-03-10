@@ -55,6 +55,7 @@ def validate_livekit_env() -> None:
 # ─── mem0 Cloud setup ─────────────────────────────────────────────────────────
 _memory = None
 
+
 def get_memory() -> MemoryClient:
     global _memory
     if _memory is None:
@@ -64,7 +65,7 @@ def get_memory() -> MemoryClient:
 
 
 def fetch_all_user_memories(user_id: str) -> str:
-    """Fetch memories from Mem0 Cloud."""
+    """Fetch memories from Mem0 Cloud strictly for the given user_id."""
     logger.info(f"[mem0] Fetching memories for user_id='{user_id}'")
     try:
         mem = get_memory()
@@ -124,7 +125,7 @@ def extract_transcript(session_history) -> list:
 
 
 def save_memory_now(user_id: str, session_history) -> bool:
-    """Save transcript to Mem0 Cloud."""
+    """Save transcript to Mem0 Cloud strictly under the given user_id."""
     try:
         transcript = extract_transcript(session_history)
         if not transcript:
@@ -133,19 +134,20 @@ def save_memory_now(user_id: str, session_history) -> bool:
         logger.info(f"[mem0] Saving {len(transcript)} messages for user_id='{user_id}'")
         mem = get_memory()
         mem.add(transcript, user_id=user_id)
-        logger.info(f"[mem0] ✅ Successfully saved memories for '{user_id}'")
+        logger.info(f"[mem0] Successfully saved memories for '{user_id}'")
         return True
     except Exception as e:
         import traceback
-        logger.error(f"[mem0] ❌ Failed to save memory for '{user_id}':\n{traceback.format_exc()}")
+        logger.error(f"[mem0] Failed to save memory for '{user_id}':\n{traceback.format_exc()}")
         return False
 
 
-# ─── Session registry ────────────────────────────────────────────────────────
-# Cloud Run may spawn multiple processes per instance. The HTTP server
-# and the agent session may live in DIFFERENT processes (different memory).
-# We use a shared /tmp file as a cross-process registry, plus an in-process
-# dict as primary storage. The /summary handler checks both.
+# ─── Session registry ─────────────────────────────────────────────────────────
+# Maps room_name -> DefaultAgent (in-process).
+# A shared /tmp JSON file allows cross-process room→user_id lookup.
+# IMPORTANT: We never fall back to an arbitrary session — each lookup
+# must resolve to the exact user_id for that room.
+
 _active_sessions: dict[str, "DefaultAgent"] = {}
 _sessions_lock = threading.Lock()
 _REGISTRY_FILE = "/tmp/agent_registry.json"
@@ -153,12 +155,12 @@ _SUMMARY_REQUEST_DIR = "/tmp/summary_requests"
 _SUMMARY_RESULT_DIR = "/tmp/summary_results"
 _registry_file_lock = threading.Lock()
 
-# Ensure shared dirs exist
 os.makedirs(_SUMMARY_REQUEST_DIR, exist_ok=True)
 os.makedirs(_SUMMARY_RESULT_DIR, exist_ok=True)
 
 
-def _write_registry_file(room_name: str, pid: int, user_id: str = "") -> None:
+def _write_registry_file(room_name: str, pid: int, user_id: str) -> None:
+    """Persist room→pid and room→user_id mapping to a shared file."""
     with _registry_file_lock:
         try:
             try:
@@ -167,10 +169,11 @@ def _write_registry_file(room_name: str, pid: int, user_id: str = "") -> None:
             except Exception:
                 data = {}
             data[room_name] = pid
-            if user_id:
-                data[room_name + "_user_id"] = user_id
+            # Always store user_id — it is mandatory, never empty
+            data[f"{room_name}__user_id"] = user_id
             with open(_REGISTRY_FILE, "w") as f:
                 json.dump(data, f)
+            logger.info(f"[registry] Wrote registry: room='{room_name}' user_id='{user_id}' pid={pid}")
         except Exception as e:
             logger.warning(f"[registry] Failed to write registry file: {e}")
 
@@ -181,6 +184,7 @@ def _remove_registry_file(room_name: str) -> None:
             with open(_REGISTRY_FILE, "r") as f:
                 data = json.load(f)
             data.pop(room_name, None)
+            data.pop(f"{room_name}__user_id", None)
             with open(_REGISTRY_FILE, "w") as f:
                 json.dump(data, f)
         except Exception:
@@ -197,10 +201,13 @@ def _read_registry_file() -> dict:
 
 
 def _register_agent(room_name: str, agent: "DefaultAgent") -> None:
+    """Register an active agent. user_id must already be set on the agent."""
+    if not agent.user_id:
+        raise ValueError(f"[registry] Cannot register agent for room '{room_name}' without a user_id")
     with _sessions_lock:
         _active_sessions[room_name] = agent
     _write_registry_file(room_name, os.getpid(), agent.user_id)
-    logger.info(f"[registry] Registered agent for room '{room_name}' (pid={os.getpid()})")
+    logger.info(f"[registry] Registered agent: room='{room_name}' user_id='{agent.user_id}' pid={os.getpid()}")
 
 
 def _unregister_agent(room_name: str) -> None:
@@ -210,11 +217,31 @@ def _unregister_agent(room_name: str) -> None:
     logger.info(f"[registry] Unregistered agent for room '{room_name}'")
 
 
-def _get_agent(room_name: str) -> "DefaultAgent | None":
+def _resolve_user_id_for_room(room_name: str) -> str | None:
+    """
+    Strictly resolve user_id for the given room_name.
+    Returns None if the room is unknown — NEVER returns a default or
+    another user's ID.
+    """
+    # 1. Check in-process registry (fastest, most reliable)
     with _sessions_lock:
-        return _active_sessions.get(room_name)
-# ──────────────────────────────────────────────────────────────────────────────
+        agent = _active_sessions.get(room_name)
+    if agent is not None:
+        logger.info(f"[registry] Resolved user_id='{agent.user_id}' for room='{room_name}' (in-process)")
+        return agent.user_id
 
+    # 2. Check cross-process file registry (for multi-process Cloud Run deployments)
+    file_reg = _read_registry_file()
+    uid = file_reg.get(f"{room_name}__user_id", "")
+    if uid:
+        logger.info(f"[registry] Resolved user_id='{uid}' for room='{room_name}' (file registry)")
+        return uid
+
+    logger.warning(f"[registry] Could not resolve user_id for room='{room_name}'")
+    return None
+
+
+# ─── Prompt helpers ───────────────────────────────────────────────────────────
 
 def build_instructions(memories_text: str) -> str:
     return f"""You are Casey, a friendly and reliable voice assistant.
@@ -269,8 +296,14 @@ Do not truncate any field. Write complete sentences. Output raw JSON only."""
 
 
 def _generate_summary_from_memories(user_id: str) -> dict:
-    """Generate a summary from mem0 memories using Gemini REST API directly."""
+    """
+    Generate a summary from mem0 memories for the given user_id using Gemini REST API.
+    Raises ValueError if user_id is empty to prevent cross-user data leakage.
+    """
     import urllib.request
+
+    if not user_id:
+        raise ValueError("user_id must not be empty — cannot generate summary without a known user")
 
     memories_text = fetch_all_user_memories(user_id)
     if not memories_text:
@@ -284,7 +317,6 @@ def _generate_summary_from_memories(user_id: str) -> dict:
     api_key = os.getenv("GEMINI_API_KEY", "")
     prompt = f"{SUMMARY_SYSTEM_PROMPT}\n\nMemory facts from all sessions:\n{memories_text}"
 
-    # Try models in order until one works
     models_to_try = [
         "gemini-1.5-flash",
         "gemini-1.5-pro",
@@ -301,9 +333,11 @@ def _generate_summary_from_memories(user_id: str) -> dict:
         list_req = urllib.request.Request(list_url)
         with urllib.request.urlopen(list_req, timeout=10) as r:
             available = json.loads(r.read())
-            names = [m["name"] for m in available.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+            names = [
+                m["name"] for m in available.get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
             logger.info(f"[summary] Available Gemini models: {names}")
-            # Use first available model
             if names:
                 models_to_try = [n.replace("models/", "") for n in names[:3]]
     except Exception as e:
@@ -311,16 +345,19 @@ def _generate_summary_from_memories(user_id: str) -> dict:
 
     last_error = None
     for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model_name}:generateContent?key={api_key}"
+        )
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
         }).encode()
 
         req = urllib.request.Request(
             url, data=payload,
             headers={"Content-Type": "application/json"},
-            method="POST"
+            method="POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=25) as resp:
@@ -332,7 +369,12 @@ def _generate_summary_from_memories(user_id: str) -> dict:
                 try:
                     return json.loads(raw)
                 except json.JSONDecodeError:
-                    return {"overview": raw, "key_points": [], "action_items": [], "topics_discussed": []}
+                    return {
+                        "overview": raw,
+                        "key_points": [],
+                        "action_items": [],
+                        "topics_discussed": [],
+                    }
         except urllib.error.HTTPError as e:
             body = e.read().decode()
             last_error = f"{model_name}: {e.code} {body[:200]}"
@@ -346,11 +388,16 @@ def _generate_summary_from_memories(user_id: str) -> dict:
     raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
 
+# ─── Agent class ──────────────────────────────────────────────────────────────
+
 class DefaultAgent(Agent):
     def __init__(self, user_id: str, instructions: str) -> None:
+        if not user_id:
+            raise ValueError("DefaultAgent requires a non-empty user_id")
         self.user_id = user_id
         self._memory_save_interval = int(os.getenv("MEMORY_SAVE_INTERVAL", "60"))
         self._save_task: asyncio.Task | None = None
+        self._summary_task: asyncio.Task | None = None
         self._room_name: str = ""
         super().__init__(instructions=instructions)
 
@@ -378,8 +425,8 @@ class DefaultAgent(Agent):
                 if os.path.exists(req_file):
                     try:
                         os.remove(req_file)
-                        logger.info(f"[summary] Generating summary for '{self._room_name}' (cross-process request)")
-                        result = await _generate_summary_for_agent(self)
+                        logger.info(f"[summary] Generating summary for room='{self._room_name}' user='{self.user_id}' (cross-process)")
+                        result = _generate_summary_from_memories(self.user_id)
                         with open(result_file, "w") as f:
                             json.dump(result, f)
                         logger.info(f"[summary] Written result to {result_file}")
@@ -398,7 +445,7 @@ class DefaultAgent(Agent):
             pass
 
     async def on_exit(self):
-        for task in [self._save_task, getattr(self, '_summary_task', None)]:
+        for task in [self._save_task, self._summary_task]:
             if task and not task.done():
                 task.cancel()
                 try:
@@ -411,6 +458,8 @@ class DefaultAgent(Agent):
         _unregister_agent(self._room_name)
 
 
+# ─── Prewarm & server setup ───────────────────────────────────────────────────
+
 def prewarm(proc):
     proc.userdata["vad"] = silero.VAD.load()
     logger.info("[mem0] Prewarm complete (memory init deferred to session start)")
@@ -420,63 +469,78 @@ server = AgentServer(num_idle_processes=0)
 server.setup_fnc = prewarm
 
 
-# ─── Async event loop shared with the HTTP handler ────────────────────────────
-_agent_loop: asyncio.AbstractEventLoop | None = None
+# ─── Resolve user identity from room context ──────────────────────────────────
 
+def _resolve_user_id_from_ctx(ctx: JobContext) -> str:
+    """
+    Derive user_id strictly from the LiveKit room context.
+    Priority:
+      1. room.metadata JSON  → user_id field
+      2. First remote participant identity
+      3. Room name pattern   → email reconstruction
+    Never returns "default_user" — raises if nothing works so the
+    session is rejected rather than mixing users.
+    """
+    import re
+
+    # 1. Room metadata
+    if ctx.room.metadata:
+        try:
+            meta = json.loads(ctx.room.metadata)
+            uid = meta.get("user_id", "").strip()
+            if uid:
+                logger.info(f"[identity] user_id from room metadata: '{uid}'")
+                return uid
+        except Exception as e:
+            logger.warning(f"[identity] Failed to parse room metadata: {e}")
+
+    # 2. Remote participant identity
+    for participant in ctx.room.remote_participants.values():
+        if participant.identity and participant.identity.strip():
+            uid = participant.identity.strip()
+            logger.info(f"[identity] user_id from participant identity: '{uid}'")
+            return uid
+
+    # 3. Room name pattern: room_<local>_<domain>_<tld>_<timestamp>
+    if ctx.room.name:
+        name = ctx.room.name
+        name = re.sub(r"^(voice_assistant_room_|room_)", "", name)
+        name = re.sub(r"_\d{10,}$", "", name)  # strip trailing unix timestamp
+        if name:
+            parts = name.split("_")
+            if len(parts) >= 3:
+                tld = parts[-1]
+                domain = parts[-2]
+                local = "_".join(parts[:-2])
+                candidate = f"{local}@{domain}.{tld}"
+            else:
+                candidate = name
+            if candidate:
+                logger.info(f"[identity] user_id extracted from room name: '{candidate}'")
+                return candidate
+
+    raise RuntimeError(
+        f"Could not resolve user_id for room '{ctx.room.name}'. "
+        "Ensure room metadata contains 'user_id' or a participant identity is present."
+    )
+
+
+# ─── Agent entrypoint ─────────────────────────────────────────────────────────
 
 @server.rtc_session(agent_name="Casey-10be")
 async def entrypoint(ctx: JobContext):
-    global _agent_loop
-    _agent_loop = asyncio.get_running_loop()
-
     logger.info("ENTRYPOINT CALLED – agent joining room")
 
-    user_id = "default_user"
+    # Strictly resolve user identity — fail loudly rather than mix users
     try:
-        if ctx.room.metadata:
-            try:
-                meta = json.loads(ctx.room.metadata)
-                uid = meta.get("user_id", "")
-                if uid:
-                    user_id = uid
-                    logger.info(f"[mem0] user_id from metadata: '{user_id}'")
-            except Exception as parse_err:
-                logger.warning(f"[mem0] Failed to parse room metadata: {parse_err}")
+        user_id = _resolve_user_id_from_ctx(ctx)
+    except RuntimeError as e:
+        logger.error(f"[identity] {e} — aborting session to prevent data leakage")
+        return
 
-        if user_id == "default_user":
-            for participant in ctx.room.remote_participants.values():
-                if participant.identity:
-                    user_id = participant.identity
-                    logger.info(f"[mem0] user_id from participant identity: '{user_id}'")
-                    break
+    logger.info(f"[identity] *** FINAL user_id for this session: '{user_id}' ***")
 
-        # Fallback: extract user identity from room name pattern
-        # e.g. "room_srushtidt03_gmail_com_1773069979472" -> "srushtidt03@gmail.com"
-        if user_id == "default_user" and ctx.room.name:
-            import re
-            # Strip leading "room_" / "voice_assistant_room_" and trailing timestamp
-            name = ctx.room.name
-            name = re.sub(r'^(voice_assistant_room_|room_)', '', name)
-            name = re.sub(r'_\d{13}$', '', name)  # remove trailing unix ms timestamp
-            if name:
-                # Restore email format: srushtidt03_gmail_com -> srushtidt03@gmail.com
-                # Pattern: everything before last two segments is local part, last two are domain
-                parts = name.split('_')
-                if len(parts) >= 3:
-                    # find the tld (com/org/net/in etc) at the end
-                    tld = parts[-1]
-                    domain = parts[-2]
-                    local = '_'.join(parts[:-2])
-                    candidate = f"{local}@{domain}.{tld}"
-                else:
-                    candidate = name
-                user_id = candidate
-                logger.info(f"[mem0] user_id extracted from room name: '{user_id}'"  )
-    except Exception as e:
-        logger.warning(f"[mem0] Could not resolve user_id: {e}")
-
-    logger.info(f"[mem0] *** FINAL user_id for this session: '{user_id}' ***")
-
+    # Load memories for this specific user
     try:
         memories_text = fetch_all_user_memories(user_id)
         if not memories_text:
@@ -500,7 +564,7 @@ async def entrypoint(ctx: JobContext):
         tts=inference.TTS(
             model="cartesia/sonic-3",
             voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
-            language="en"
+            language="en",
         ),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
@@ -519,19 +583,19 @@ async def entrypoint(ctx: JobContext):
     )
 
 
-# ─── HTTP server with /summary endpoint ───────────────────────────────────────
+# ─── HTTP server ──────────────────────────────────────────────────────────────
+
 class Handler(BaseHTTPRequestHandler):
     """
-    Health check  : GET /
-    Session summary: GET /summary?room=<room_name>
+    GET /                         → health check
+    GET /rooms                    → debug: list registered rooms
+    GET /summary?room=<room_name> → per-user conversation summary
+    GET /summary?user_id=<uid>    → per-user conversation summary (direct)
 
-    The summary endpoint returns JSON:
-    {
-      "overview": "...",
-      "key_points": [...],
-      "action_items": [...],
-      "topics_discussed": [...]
-    }
+    The /summary endpoint is strictly isolated per user:
+    - It resolves user_id only from the exact room name supplied.
+    - It NEVER falls back to another session or a default user.
+    - Missing / unresolvable room → 404.
     """
 
     def _send_json(self, status: int, payload: dict) -> None:
@@ -539,7 +603,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        # Allow the frontend (any origin) to call this endpoint
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
@@ -556,14 +619,15 @@ class Handler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        # ── Health check ──────────────────────────────────────────────────────
         if parsed.path == "/":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
             return
 
+        # ── Debug: list rooms ─────────────────────────────────────────────────
         if parsed.path == "/rooms":
-            # Debug: see registered rooms across all processes
             in_proc = list(_active_sessions.keys())
             file_reg = _read_registry_file()
             self._send_json(200, {
@@ -573,44 +637,46 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # ── Per-user summary ──────────────────────────────────────────────────
         if parsed.path == "/summary":
             params = parse_qs(parsed.query)
-            room_name = (params.get("room") or [""])[0]
-            # Allow passing user_id directly as a fallback
-            user_id = (params.get("user_id") or [""])[0]
+            room_name = (params.get("room") or [""])[0].strip()
+            # Optional: caller may pass user_id directly (e.g. from frontend session state)
+            explicit_user_id = (params.get("user_id") or [""])[0].strip()
 
-            if not room_name and not user_id:
-                self._send_json(400, {"error": "Missing 'room' query parameter"})
+            user_id: str | None = None
+
+            if explicit_user_id:
+                # Caller supplied user_id directly — trust it (frontend is responsible)
+                user_id = explicit_user_id
+                logger.info(f"[summary] user_id supplied directly: '{user_id}'")
+            elif room_name:
+                # Strict lookup — only this room, no fallbacks
+                user_id = _resolve_user_id_for_room(room_name)
+            else:
+                self._send_json(400, {
+                    "error": "Provide either 'room' or 'user_id' as a query parameter."
+                })
                 return
 
-            # Resolve user_id from active sessions if not provided directly
             if not user_id:
-                # Check in-process registry first
-                agent = _get_agent(room_name)
-                if agent is None:
-                    with _sessions_lock:
-                        sessions = list(_active_sessions.values())
-                    if len(sessions) == 1:
-                        agent = sessions[0]
-                # Check file registry for cross-process sessions
-                if agent is None:
-                    file_reg = _read_registry_file()
-                    uid_from_file = file_reg.get(room_name + "_user_id", "")
-                    if uid_from_file:
-                        user_id = uid_from_file
+                # Room is unknown / session not active in any process
+                logger.warning(f"[summary] Unknown room='{room_name}' — refusing to serve summary")
+                self._send_json(404, {
+                    "error": (
+                        f"No active session found for room '{room_name}'. "
+                        "The session may have ended or belongs to a different process. "
+                        "Pass ?user_id=<email> directly if you know the user identity."
+                    )
+                })
+                return
 
-                if agent is not None:
-                    user_id = agent.user_id
-
-            if not user_id:
-                user_id = "default_user"
-
-            logger.info(f"[summary] Generating mem0-based summary for user_id='{user_id}'")
+            logger.info(f"[summary] Generating summary for user_id='{user_id}'")
             try:
                 result = _generate_summary_from_memories(user_id)
                 self._send_json(200, result)
             except Exception as exc:
-                logger.error(f"[summary] Error: {exc}")
+                logger.error(f"[summary] Error generating summary for '{user_id}': {exc}")
                 self._send_json(500, {"error": str(exc)})
             return
 
@@ -620,6 +686,8 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # suppress noisy access logs
 
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
