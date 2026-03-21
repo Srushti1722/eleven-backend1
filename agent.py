@@ -611,8 +611,9 @@ async def entrypoint(ctx: JobContext):
             model="gemini-3-flash-preview",
         ),
         tts=google.TTS(
-            voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
-            language="en",
+            model_name="gemini-2.5-flash-preview-tts",
+            voice_name="Kore",          # Google voice name, e.g. "Kore", "Charon", "Fenrir"
+            language="en-US",
         ),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
