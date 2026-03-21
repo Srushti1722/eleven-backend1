@@ -601,7 +601,7 @@ async def entrypoint(ctx: JobContext):
 
     session = AgentSession(
         stt=inference.STT(model="ink-whisper", provider="cartesia", language="en"),
-        llm=inference.LLM(model="gemini-2.0-flash"),
+        llm=inference.LLM(model="gemini-2.5-flash"),
         tts=inference.TTS(
             model="sonic-2",
             provider="cartesia",
