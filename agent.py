@@ -600,10 +600,11 @@ async def entrypoint(ctx: JobContext):
     _register_agent(ctx.room.name, agent)
 
     session = AgentSession(
-        stt=inference.STT(model="gemini-3-flash-preview", language="en"),
-        llm=inference.LLM(model="gemini-3-flash-preview"),
+        stt=inference.STT(model="ink-whisper", provider="cartesia", language="en"),
+        llm=inference.LLM(model="gemini-2.0-flash"),
         tts=inference.TTS(
-            model="gemini-2.5-flash-preview-tts",
+            model="sonic-2",
+            provider="cartesia",
             voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
             language="en",
         ),
