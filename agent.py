@@ -600,12 +600,20 @@ async def entrypoint(ctx: JobContext):
     _register_agent(ctx.room.name, agent)
 
     session = AgentSession(
-        stt=inference.STT(model="cartesia/ink-whisper", language="en"),
-        llm=inference.LLM(model="gemini-2.5-flash"),
+        stt=inference.STT(
+            model="assemblyai/u3-rt-pro", 
+            language="en"
+        ),
+        llm=inference.LLM(model="gemini-2.5-pro"),
         tts=inference.TTS(
-            model="cartesia/sonic-2",
-            voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+            model="cartesia/sonic-3", 
+            voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc", 
             language="en",
+            extra_kwargs={
+                "speed": 1.5,
+                "volume": 1.2,
+                "emotion": "excited"
+            }
         ),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
