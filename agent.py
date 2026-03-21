@@ -611,7 +611,6 @@ async def entrypoint(ctx: JobContext):
             model="gemini-3-flash-preview",
         ),
         tts=google.TTS(
-            model="gemini-2.5-flash-preview-tts",
             voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
             language="en",
         ),
