@@ -342,9 +342,10 @@ def _generate_summary_from_memories(user_id: str) -> dict:
             "key_points": [],
             "action_items": [],
             "topics_discussed": [],
+            
         }
 
-    api_key = os.getenv("GEMINI_API_KEY", "")
+    api_key = os.getenv("GOOGLE_API_KEY", "")
     prompt = f"{SUMMARY_SYSTEM_PROMPT}\n\nMemory facts from all sessions:\n{memories_text}"
 
     models_to_try = [
@@ -604,18 +605,15 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         stt=google.STT(
             model="gemini-3-flash-preview",
-            api_key=os.environ.get("GEMINI_API_KEY"),
             languages=["en-US"],
         ),
         llm=google.LLM(
             model="gemini-3-flash-preview",
-            api_key=os.environ.get("GEMINI_API_KEY"),
         ),
         tts=google.TTS(
             model="gemini-2.5-flash-preview-tts",
             voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
             language="en",
-            api_key=os.environ.get("GEMINI_API_KEY"),
         ),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
