@@ -8,4 +8,5 @@ fastembed
 python-dotenv
 litellm
 google-generativeai>=0.5.0
-livekit-plugins-google
+
+livekit-plugins-google>=0.10.0
