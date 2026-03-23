@@ -604,15 +604,13 @@ async def entrypoint(ctx: JobContext):
     
     session = AgentSession(
         stt=google.STT(
-            model="long",
             languages=["en-US"],
         ),
         llm=google.LLM(
-            model="gemini-3-flash-preview",
+            model="gemini-2.0-flash",
         ),
         tts=google.TTS(
-            model_name="gemini-2.5-flash-preview-tts",
-            voice_name="Kore",          # Google voice name, e.g. "Kore", "Charon", "Fenrir"
+            voice_name="Kore",
             language="en-US",
         ),
         vad=ctx.proc.userdata["vad"],
