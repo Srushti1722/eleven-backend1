@@ -604,7 +604,7 @@ async def entrypoint(ctx: JobContext):
     
     session = AgentSession(
         stt=google.STT(
-            model="gemini-3-flash-preview",
+            model="long",
             languages=["en-US"],
         ),
         llm=google.LLM(
