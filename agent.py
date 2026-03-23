@@ -496,7 +496,7 @@ def prewarm(proc):
     logger.info("[mem0] Prewarm complete (memory init deferred to session start)")
 
 
-server = AgentServer(num_idle_processes=0)
+server = AgentServer(num_idle_processes=1)
 server.setup_fnc = prewarm
 
 
