@@ -606,9 +606,7 @@ async def entrypoint(ctx: JobContext):
         stt=google.STT(
             languages=["en-US"],
         ),
-        llm=google.LLM(
-            model="gemini-2.0-flash",
-        ),
+        llm=google.LLM(model="gemini-2.0-flash-lite"),
         tts=google.TTS(
             voice_name="Kore",
             language="en-US",
